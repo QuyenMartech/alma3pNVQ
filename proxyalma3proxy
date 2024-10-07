@@ -20,12 +20,35 @@ install_3proxy() {
     cd 3proxy-master
     dnf install -y gcc make gcc-c++ zlib-devel openssl-devel pcre-devel
     make -f Makefile.Linux
-    # Verify installation
-    if [ -f src/3proxy ]; then
+    
+    # Hiển thị nội dung thư mục src và bin
+    echo "Contents of src directory:"
+    ls -l src/
+    echo "Contents of bin directory:"
+    ls -l bin/
+    
+    # Kiểm tra cụ thể tệp 3proxy
+    if [ -f bin/3proxy ]; then
+        echo "3proxy binary found in bin/"
+        mkdir -p /usr/local/etc/3proxy/bin
+        cp bin/3proxy /usr/local/etc/3proxy/bin/
+    elif [ -f src/3proxy ]; then
+        echo "3proxy binary found in src/"
         mkdir -p /usr/local/etc/3proxy/bin
         cp src/3proxy /usr/local/etc/3proxy/bin/
     else
-        echo "Error: 3proxy binary not found in src/"
+        echo "Error: 3proxy binary not found in src/ or bin/"
+        echo "Attempting to download pre-compiled version..."
+        mkdir -p /usr/local/etc/3proxy/bin
+        wget -O /usr/local/etc/3proxy/bin/3proxy https://github.com/z3APA3A/3proxy/releases/download/0.9.4/3proxy-0.9.4.x86_64
+        chmod +x /usr/local/etc/3proxy/bin/3proxy
+    fi
+    
+    # Kiểm tra lại sau khi cài đặt
+    if [ -f /usr/local/etc/3proxy/bin/3proxy ]; then
+        echo "3proxy successfully installed"
+    else
+        echo "Error: Failed to install 3proxy"
         exit 1
     fi
 }
