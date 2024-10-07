@@ -21,13 +21,11 @@ install_3proxy() {
     dnf install -y gcc make gcc-c++ zlib-devel openssl-devel pcre-devel
     make -f Makefile.Linux
     
-    # Hiển thị nội dung thư mục src và bin
     echo "Contents of src directory:"
     ls -l src/
     echo "Contents of bin directory:"
     ls -l bin/
     
-    # Kiểm tra cụ thể tệp 3proxy
     if [ -f bin/3proxy ]; then
         echo "3proxy binary found in bin/"
         mkdir -p /usr/local/etc/3proxy/bin
@@ -44,7 +42,6 @@ install_3proxy() {
         chmod +x /usr/local/etc/3proxy/bin/3proxy
     fi
     
-    # Kiểm tra lại sau khi cài đặt
     if [ -f /usr/local/etc/3proxy/bin/3proxy ]; then
         echo "3proxy successfully installed"
     else
@@ -56,7 +53,7 @@ install_3proxy() {
 gen_3proxy() {
     cat <<EOF
 daemon
-maxconn 1000
+maxconn 2000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
@@ -146,29 +143,42 @@ ExecStart=/usr/local/etc/3proxy/bin/3proxy /usr/local/etc/3proxy/3proxy.cfg
 ExecReload=/bin/kill -HUP \$MAINPID
 ExecStop=/bin/kill -TERM \$MAINPID
 Restart=always
+LimitNOFILE=65536
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-# Check if the systemd service file exists and is correct
 if [ ! -f /etc/systemd/system/3proxy.service ]; then
     echo "Error: 3proxy systemd service file not found!"
     exit 1
 fi
+
+# Increase system-wide limits
+cat >> /etc/security/limits.conf <<EOF
+* soft nofile 65536
+* hard nofile 65536
+root soft nofile 65536
+root hard nofile 65536
+EOF
+
+# Reload system limits
+sysctl -p
 
 # Reload systemd and start the service
 systemctl daemon-reload
 systemctl enable 3proxy
 systemctl start 3proxy
 
-# Check if the service is running
 if ! systemctl is-active --quiet 3proxy; then
     echo "Error: 3proxy service failed to start!"
     journalctl -u 3proxy.service -b
     exit 1
 fi
-journalctl -u 3proxy.service -b
+
+echo "3proxy service status:"
+systemctl status 3proxy
+
 gen_proxy_file_for_user
 
 upload_proxy
