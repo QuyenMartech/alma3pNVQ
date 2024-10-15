@@ -1,101 +1,84 @@
 #!/bin/bash
 
-# Kiểm tra quyền root
+# Kiểm tra nếu script chạy với quyền root
 if [ "$(id -u)" != "0" ]; then
-  echo "This script must be run as root" 1>&2
-  exit 1
+    echo "This script must be run as root" 1>&2
+    exit 1
 fi
 
-# Hàm tạo chuỗi ngẫu nhiên
 random() {
-  tr </dev/urandom -dc A-Za-z0-9 | head -c5
-  echo
+    tr </dev/urandom -dc A-Za-z0-9 | head -c5
+    echo
 }
 
-# Hàm tạo địa chỉ IPv6
 array=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
 gen64() {
-  ip64() {
-    echo "${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}"
-  }
-  echo "$1:$(ip64):$(ip64):$(ip64):$(ip64)"
+    ip64() {
+        echo "${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}"
+    }
+    echo "$1:$(ip64):$(ip64):$(ip64):$(ip64)"
 }
 
-# Cài đặt 3proxy
 install_3proxy() {
-  echo "Installing 3proxy"
-  URL="https://github.com/3proxy/3proxy/archive/0.9.3.tar.gz"
-  wget -qO- $URL | bsdtar -xvf-
-  cd 3proxy-0.9.3
-  make -f Makefile.Linux
-  mkdir -p /usr/local/etc/3proxy/{bin,logs,stat}
-  cp bin/3proxy /usr/local/etc/3proxy/bin/
-  cd $WORKDIR
-  
-  # Đảm bảo thư mục logs tồn tại và có quyền ghi
-  mkdir -p /usr/local/etc/3proxy/logs
-  chmod 777 /usr/local/etc/3proxy/logs
+    echo "Installing 3proxy"
+    URL="https://raw.githubusercontent.com/quayvlog/quayvlog/main/3proxy-3proxy-0.8.6.tar.gz"
+    wget -qO- $URL | bsdtar -xvf-
+    cd 3proxy-3proxy-0.8.6
+    make -f Makefile.Linux
+    mkdir -p /usr/local/etc/3proxy/{bin,logs,stat}
+    cp src/3proxy /usr/local/etc/3proxy/bin/
+    cd $WORKDIR
 }
 
-# Tạo cấu hình 3proxy
 gen_3proxy() {
-  cat <<EOF
+    cat <<EOF
 daemon
-maxconn 2000
-nserver 1.1.1.1
-nserver 8.8.8.8
+maxconn 1000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
 setuid 65535
-stacksize 6291456 
 flush
 auth none
-log /usr/local/etc/3proxy/logs/3proxy.log D
-logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
-$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5}' ${WORKDATA})
+$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5 " -S127.0.0.1"}' ${WORKDATA})
 
+end
 EOF
 }
 
-# Tạo file proxy cho người dùng
 gen_proxy_file_for_user() {
-  cat >proxy.txt <<EOF
+    cat >proxy.txt <<EOF
 $(awk -F "/" '{print $3 ":" $4 ":" $1 ":" $2 }' ${WORKDATA})
 EOF
 }
 
-# In thông tin proxy
 print_proxy() {
-  echo "Proxy is ready! Format IP:PORT:LOGIN:PASS"
-  echo "Here are your proxy details:"
-  cat proxy.txt
+    echo "Proxy is ready! Format IP:PORT:LOGIN:PASS"
+    echo "Here are your proxy details:"
+    cat proxy.txt
 }
 
-# Tạo dữ liệu proxy
 gen_data() {
-  seq $FIRST_PORT $LAST_PORT | while read port; do
-    echo "usr$(random)/pass$(random)/$IP4/$port/$(gen64 $IP6)"
-  done
+    seq $FIRST_PORT $LAST_PORT | while read port; do
+        echo "usr$(random)/pass$(random)/$IP4/$port/$(gen64 $IP6)"
+    done
 }
 
-# Tạo quy tắc iptables
 gen_iptables() {
-  cat <<EOF
+    cat <<EOF
 $(awk -F "/" '{print "iptables -I INPUT -p tcp --dport " $4 " -m state --state NEW -j ACCEPT"}' ${WORKDATA})
 EOF
 }
 
-# Tạo cấu hình IPv6
 gen_ifconfig() {
-  cat <<EOF
+    cat <<EOF
 $(awk -F "/" '{print "ip -6 addr add " $5 "/64 dev enp1s0"}' ${WORKDATA})
 EOF
 }
 
 echo "Installing required packages"
-yum -y install gcc net-tools bsdtar zip wget make >/dev/null
+yum -y install gcc net-tools bsdtar zip >/dev/null
 
 install_3proxy
 
@@ -122,11 +105,8 @@ chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
 
-cat <<EOF >> /etc/security/limits.conf
-* soft nofile 65535
-* hard nofile 65535
-EOF
-
+echo "* soft nofile 65535" >> /etc/security/limits.conf
+echo "* hard nofile 65535" >> /etc/security/limits.conf
 echo "session required pam_limits.so" >> /etc/pam.d/common-session
 
 cat >/etc/systemd/system/3proxy.service <<EOF
@@ -138,20 +118,13 @@ After=network.target
 Type=simple
 ExecStart=/usr/local/etc/3proxy/bin/3proxy /usr/local/etc/3proxy/3proxy.cfg
 ExecStop=/bin/kill -TERM \$MAINPID
-RestartSec=5s
-Restart=on-failure
+RemainAfterExit=yes
+Restart=always
 LimitNOFILE=65535
-User=root
-Group=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
-
-# Thay đổi quyền sở hữu của các thư mục và tệp 3proxy
-chown -R root:root /usr/local/etc/3proxy
-chmod 755 /usr/local/etc/3proxy/bin/3proxy
-chmod 644 /usr/local/etc/3proxy/3proxy.cfg
 
 systemctl daemon-reload
 systemctl enable 3proxy
@@ -164,15 +137,28 @@ gen_proxy_file_for_user
 
 print_proxy
 
-echo "Configuring firewall"
-firewall-cmd --permanent --add-port=${FIRST_PORT}-${LAST_PORT}/tcp
-firewall-cmd --reload
+systemctl restart 3proxy
 
-echo "Setting IPv6"
-sysctl -w net.ipv6.conf.all.disable_ipv6=0
-sysctl -w net.ipv6.conf.default.disable_ipv6=0
+echo "3proxy has been installed and configured. Check /var/log/3proxy.log for logs."
+echo "You can check the status of 3proxy by running: systemctl status 3proxy"
 
-echo "3proxy installation completed. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
+if systemctl is-active --quiet 3proxy; then
+    echo "3proxy is running."
+else
+    echo "3proxy failed to start. Check the logs with: journalctl -u 3proxy"
+fi
 
-# Kiểm tra trạng thái của 3proxy
-systemctl status 3proxy
+echo "Contents of 3proxy configuration file:"
+cat /usr/local/etc/3proxy/3proxy.cfg
+
+echo "Listening ports:"
+ss -tuln | grep 3proxy
+
+echo "Firewall status:"
+if command -v firewall-cmd &> /dev/null; then
+    firewall-cmd --list-all
+elif command -v iptables &> /dev/null; then
+    iptables -L -n
+else
+    echo "No firewall detected"
+fi
