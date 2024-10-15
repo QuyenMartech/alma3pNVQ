@@ -141,6 +141,8 @@ ExecStop=/bin/kill -TERM \$MAINPID
 RestartSec=5s
 Restart=on-failure
 LimitNOFILE=65535
+User=nobody
+Group=nogroup
 
 [Install]
 WantedBy=multi-user.target
@@ -148,6 +150,8 @@ EOF
 
 # Thay đổi quyền sở hữu của các thư mục và tệp 3proxy
 chown -R nobody:nogroup /usr/local/etc/3proxy
+chmod 755 /usr/local/etc/3proxy/bin/3proxy
+chmod 644 /usr/local/etc/3proxy/3proxy.cfg
 
 systemctl daemon-reload
 systemctl enable 3proxy
@@ -169,3 +173,6 @@ sysctl -w net.ipv6.conf.all.disable_ipv6=0
 sysctl -w net.ipv6.conf.default.disable_ipv6=0
 
 echo "3proxy installation completed. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
+
+# Kiểm tra trạng thái của 3proxy
+systemctl status 3proxy
