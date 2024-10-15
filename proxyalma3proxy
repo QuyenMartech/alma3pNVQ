@@ -29,7 +29,7 @@ install_3proxy() {
   cd 3proxy-0.9.3
   make -f Makefile.Linux
   mkdir -p /usr/local/etc/3proxy/{bin,logs,stat}
-  cp src/3proxy /usr/local/etc/3proxy/bin/
+  cp bin/3proxy /usr/local/etc/3proxy/bin/
   cd $WORKDIR
   
   # Đảm bảo thư mục logs tồn tại và có quyền ghi
@@ -141,15 +141,15 @@ ExecStop=/bin/kill -TERM \$MAINPID
 RestartSec=5s
 Restart=on-failure
 LimitNOFILE=65535
-User=nobody
-Group=nobody
+User=root
+Group=root
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 # Thay đổi quyền sở hữu của các thư mục và tệp 3proxy
-chown -R nobody:nobody /usr/local/etc/3proxy
+chown -R root:root /usr/local/etc/3proxy
 chmod 755 /usr/local/etc/3proxy/bin/3proxy
 chmod 644 /usr/local/etc/3proxy/3proxy.cfg
 
