@@ -41,10 +41,9 @@ setuid 65535
 flush
 auth none
 
-$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
+$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5}' ${WORKDATA})
 
-log /var/log/3proxy.log D
-rotate 10
+end
 EOF
 }
 
