@@ -155,3 +155,21 @@ if systemctl is-active --quiet 3proxy; then
 else
   echo "3proxy failed to start. Check the logs with: journalctl -u 3proxy"
 fi
+
+# Hiển thị nội dung của file cấu hình 3proxy
+echo "Contents of 3proxy configuration file:"
+cat /usr/local/etc/3proxy/3proxy.cfg
+
+# Kiểm tra các cổng đang lắng nghe
+echo "Listening ports:"
+ss -tuln | grep 3proxy
+
+# Kiểm tra firewall
+echo "Firewall status:"
+if command -v firewall-cmd &> /dev/null; then
+    firewall-cmd --list-all
+elif command -v iptables &> /dev/null; then
+    iptables -L -n
+else
+    echo "No firewall detected"
+fi
