@@ -42,6 +42,9 @@ flush
 auth none
 
 $(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
+
+log /var/log/3proxy.log D
+rotate 10
 EOF
 }
 
@@ -103,12 +106,10 @@ chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
 
-# Tăng giới hạn số lượng tệp mô tả (file descriptor limit)
 echo "* soft nofile 65535" >> /etc/security/limits.conf
 echo "* hard nofile 65535" >> /etc/security/limits.conf
 echo "session required pam_limits.so" >> /etc/pam.d/common-session
 
-# Tạo tệp dịch vụ systemd
 cat >/etc/systemd/system/3proxy.service <<EOF
 [Unit]
 Description=3proxy tiny proxy server
@@ -126,12 +127,10 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
-# Kích hoạt và khởi động dịch vụ
 systemctl daemon-reload
 systemctl enable 3proxy
 systemctl start 3proxy
 
-# Chạy các script iptables và ifconfig
 bash ${WORKDIR}/boot_iptables.sh
 bash ${WORKDIR}/boot_ifconfig.sh
 
@@ -139,32 +138,23 @@ gen_proxy_file_for_user
 
 print_proxy
 
-# Thêm cấu hình ghi nhật ký
-echo "log /var/log/3proxy.log D" >>/usr/local/etc/3proxy/3proxy.cfg
-echo "rotate 10" >>/usr/local/etc/3proxy/3proxy.cfg
-
-# Khởi động lại 3proxy để áp dụng thay đổi
 systemctl restart 3proxy
 
 echo "3proxy has been installed and configured. Check /var/log/3proxy.log for logs."
 echo "You can check the status of 3proxy by running: systemctl status 3proxy"
 
-# Kiểm tra nếu 3proxy đang chạy
 if systemctl is-active --quiet 3proxy; then
   echo "3proxy is running."
 else
   echo "3proxy failed to start. Check the logs with: journalctl -u 3proxy"
 fi
 
-# Hiển thị nội dung của file cấu hình 3proxy
 echo "Contents of 3proxy configuration file:"
 cat /usr/local/etc/3proxy/3proxy.cfg
 
-# Kiểm tra các cổng đang lắng nghe
 echo "Listening ports:"
 ss -tuln | grep 3proxy
 
-# Kiểm tra firewall
 echo "Firewall status:"
 if command -v firewall-cmd &> /dev/null; then
     firewall-cmd --list-all
