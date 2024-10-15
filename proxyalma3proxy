@@ -31,6 +31,10 @@ install_3proxy() {
   mkdir -p /usr/local/etc/3proxy/{bin,logs,stat}
   cp src/3proxy /usr/local/etc/3proxy/bin/
   cd $WORKDIR
+  
+  # Đảm bảo thư mục logs tồn tại và có quyền ghi
+  mkdir -p /usr/local/etc/3proxy/logs
+  chmod 777 /usr/local/etc/3proxy/logs
 }
 
 # Tạo cấu hình 3proxy
@@ -47,6 +51,8 @@ setuid 65535
 stacksize 6291456 
 flush
 auth none
+log /usr/local/etc/3proxy/logs/3proxy.log D
+logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
 $(awk -F "/" '{print "socks -6 -n -a -p" $4 " -i" $3 " -e" $5}' ${WORKDATA})
 
@@ -89,7 +95,7 @@ EOF
 }
 
 echo "Installing required packages"
-yum -y install gcc net-tools bsdtar zip wget >/dev/null
+yum -y install gcc net-tools bsdtar zip wget make >/dev/null
 
 install_3proxy
 
@@ -140,6 +146,9 @@ LimitNOFILE=65535
 WantedBy=multi-user.target
 EOF
 
+# Thay đổi quyền sở hữu của các thư mục và tệp 3proxy
+chown -R nobody:nogroup /usr/local/etc/3proxy
+
 systemctl daemon-reload
 systemctl enable 3proxy
 systemctl start 3proxy
@@ -159,4 +168,4 @@ echo "Setting IPv6"
 sysctl -w net.ipv6.conf.all.disable_ipv6=0
 sysctl -w net.ipv6.conf.default.disable_ipv6=0
 
-echo "3proxy installation completed. Check /var/log/3proxy/3proxy.log for logs."
+echo "3proxy installation completed. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
