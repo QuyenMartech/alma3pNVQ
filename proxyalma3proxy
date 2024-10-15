@@ -54,7 +54,7 @@ auth none
 log /usr/local/etc/3proxy/logs/3proxy.log D
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 
-$(awk -F "/" '{print "socks -6 -n -a -p" $4 " -i" $3 " -e" $5}' ${WORKDATA})
+$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5}' ${WORKDATA})
 
 EOF
 }
@@ -142,14 +142,14 @@ RestartSec=5s
 Restart=on-failure
 LimitNOFILE=65535
 User=nobody
-Group=nogroup
+Group=nobody
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
 # Thay đổi quyền sở hữu của các thư mục và tệp 3proxy
-chown -R nobody:nogroup /usr/local/etc/3proxy
+chown -R nobody:nobody /usr/local/etc/3proxy
 chmod 755 /usr/local/etc/3proxy/bin/3proxy
 chmod 644 /usr/local/etc/3proxy/3proxy.cfg
 
