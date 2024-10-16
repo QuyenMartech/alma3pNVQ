@@ -33,7 +33,7 @@ install_3proxy() {
 gen_3proxy() {
     cat <<EOF
 daemon
-maxconn 1000
+maxconn 2000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
@@ -93,6 +93,12 @@ echo "Internal IP = ${IP4}. External subnet for IPv6 = ${IP6}"
 echo "How many proxies do you want to create? Example: 500"
 read COUNT
 
+# Kiểm tra và giới hạn số lượng proxy
+if [ "$COUNT" -gt 1000 ]; then
+    echo "Warning: Creating more than 1000 proxies might cause issues. Limiting to 1000."
+    COUNT=1000
+fi
+
 FIRST_PORT=10000
 LAST_PORT=$(($FIRST_PORT + $COUNT - 1))
 
@@ -103,9 +109,15 @@ chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
 
-echo "* soft nofile 65535" >> /etc/security/limits.conf
-echo "* hard nofile 65535" >> /etc/security/limits.conf
+# Tăng giới hạn file mở
+echo "* soft nofile 1000000" >> /etc/security/limits.conf
+echo "* hard nofile 1000000" >> /etc/security/limits.conf
 echo "session required pam_limits.so" >> /etc/pam.d/common-session
+
+# Tăng giới hạn số lượng file mô tả
+echo "fs.file-max = 2097152" >> /etc/sysctl.conf
+echo "net.ipv4.ip_local_port_range = 1024 65000" >> /etc/sysctl.conf
+sysctl -p
 
 cat >/etc/systemd/system/3proxy.service <<EOF
 [Unit]
@@ -118,7 +130,7 @@ ExecStart=/usr/local/etc/3proxy/bin/3proxy /usr/local/etc/3proxy/3proxy.cfg
 ExecStop=/bin/kill -TERM \$MAINPID
 RemainAfterExit=yes
 Restart=always
-LimitNOFILE=65535
+LimitNOFILE=1000000
 
 [Install]
 WantedBy=multi-user.target
@@ -160,7 +172,7 @@ else
     echo "No firewall detected"
 fi
 
-# Thêm kiểm tra và khởi động lại nếu cần
+# Kiểm tra và khởi động lại nếu cần
 if ! pgrep -x "3proxy" > /dev/null; then
     echo "3proxy is not running. Attempting to start..."
     systemctl start 3proxy
@@ -171,3 +183,11 @@ if ! pgrep -x "3proxy" > /dev/null; then
         echo "Failed to start 3proxy. Please check the logs."
     fi
 fi
+
+# Kiểm tra tài nguyên hệ thống
+echo "System resources:"
+free -m
+df -h
+ulimit -n
+
+echo "Script completed. Please test your proxies."
