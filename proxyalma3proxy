@@ -33,7 +33,7 @@ install_3proxy() {
 gen_3proxy() {
     cat <<EOF
 daemon
-maxconn 10000
+maxconn 2000
 nscache 65536
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
@@ -41,7 +41,7 @@ setuid 65535
 flush
 auth none
 
-$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
+$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA} | sed 's/$/\n/')
 EOF
 }
 
@@ -93,6 +93,13 @@ echo "Internal IP = ${IP4}. External subnet for IPv6 = ${IP6}"
 echo "How many proxies do you want to create? Example: 500"
 read COUNT
 
+# Giới hạn số lượng proxy tối đa
+MAX_PROXIES=1000
+if [ $COUNT -gt $MAX_PROXIES ]; then
+    echo "Warning: Number of proxies limited to $MAX_PROXIES"
+    COUNT=$MAX_PROXIES
+fi
+
 FIRST_PORT=10000
 LAST_PORT=$(($FIRST_PORT + $COUNT - 1))
 
@@ -103,11 +110,22 @@ chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
 
-echo "* soft nofile 1000000" >> /etc/security/limits.conf
-echo "* hard nofile 1000000" >> /etc/security/limits.conf
-echo "session required pam_limits.so" >> /etc/pam.d/common-session
+echo "3proxy configuration file created. Checking content:"
+cat /usr/local/etc/3proxy/3proxy.cfg
 
-ulimit -n 1000000
+echo "Number of proxy entries:"
+grep -c "proxy -6" /usr/local/etc/3proxy/3proxy.cfg
+
+if /usr/local/etc/3proxy/bin/3proxy -C /usr/local/etc/3proxy/3proxy.cfg; then
+    echo "3proxy configuration syntax is correct."
+else
+    echo "Error in 3proxy configuration. Please check the file."
+    exit 1
+fi
+
+echo "* soft nofile 65535" >> /etc/security/limits.conf
+echo "* hard nofile 65535" >> /etc/security/limits.conf
+echo "session required pam_limits.so" >> /etc/pam.d/common-session
 
 cat >/etc/systemd/system/3proxy.service <<EOF
 [Unit]
@@ -120,7 +138,7 @@ ExecStart=/usr/local/etc/3proxy/bin/3proxy /usr/local/etc/3proxy/3proxy.cfg
 ExecStop=/bin/kill -TERM \$MAINPID
 RemainAfterExit=yes
 Restart=always
-LimitNOFILE=1000000
+LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
@@ -143,15 +161,22 @@ gen_proxy_file_for_user
 print_proxy
 
 systemctl start 3proxy
+sleep 5
+if systemctl is-active --quiet 3proxy; then
+    echo "3proxy started successfully."
+    journalctl -u 3proxy --no-pager | tail -n 50
+else
+    echo "Failed to start 3proxy. Check logs:"
+    journalctl -u 3proxy --no-pager | tail -n 50
+fi
 
-echo "Waiting for 3proxy to initialize..."
-sleep 10
+echo "3proxy has been installed and configured. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
+echo "You can check the status of 3proxy by running: systemctl status 3proxy"
 
 if systemctl is-active --quiet 3proxy; then
     echo "3proxy is running."
 else
     echo "3proxy failed to start. Check the logs with: journalctl -u 3proxy"
-    exit 1
 fi
 
 echo "Contents of 3proxy configuration file:"
@@ -163,6 +188,18 @@ ss -tuln | grep 3proxy
 echo "Firewall status:"
 firewall-cmd --list-all
 
+# Thêm kiểm tra và khởi động lại nếu cần
+if ! pgrep -x "3proxy" > /dev/null; then
+    echo "3proxy is not running. Attempting to start..."
+    systemctl start 3proxy
+    sleep 5
+    if pgrep -x "3proxy" > /dev/null; then
+        echo "3proxy has been successfully started."
+    else
+        echo "Failed to start 3proxy. Please check the logs."
+    fi
+fi
+
 # Kiểm tra kết nối
 echo "Testing proxy connections..."
 for port in $(seq $FIRST_PORT $LAST_PORT); do
@@ -172,5 +209,3 @@ for port in $(seq $FIRST_PORT $LAST_PORT); do
         echo "Port $port is not accessible"
     fi
 done
-
-echo "Proxy setup completed. The list of proxies has been saved to proxy.txt."
