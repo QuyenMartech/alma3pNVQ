@@ -41,8 +41,21 @@ setuid 65535
 flush
 auth none
 
-$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
 EOF
+
+    # Chia nhỏ cấu hình proxy thành nhiều file
+    local proxy_count=$(wc -l < ${WORKDATA})
+    local files_needed=$(( (proxy_count + 49) / 50 ))
+    
+    for i in $(seq 1 $files_needed); do
+        local start_line=$(( (i-1)*50 + 1 ))
+        local end_line=$(( i*50 ))
+        
+        sed -n "${start_line},${end_line}p" ${WORKDATA} | \
+        awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' > /usr/local/etc/3proxy/proxy_conf_${i}.txt
+        
+        echo "include /usr/local/etc/3proxy/proxy_conf_${i}.txt" >> /usr/local/etc/3proxy/3proxy.cfg
+    done
 }
 
 gen_proxy_file_for_user() {
