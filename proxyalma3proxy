@@ -40,7 +40,7 @@ setgid 65535
 setuid 65535
 flush
 auth none
-
+users $(awk -F "/" 'BEGIN{ORS="";} {print $1 ":CL:" $2 " "}' ${WORKDATA})
 $(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
 EOF
 }
@@ -90,13 +90,22 @@ IP6=$(curl -6 -s icanhazip.com | cut -f1-4 -d':')
 
 echo "Internal IP = ${IP4}. External subnet for IPv6 = ${IP6}"
 
-echo "How many proxies do you want to create? Example: 500"
+echo "How many proxies do you want to create? Example: 120"
 read COUNT
 
-# Kiểm tra và giới hạn số lượng proxy
-if [ "$COUNT" -gt 1000 ]; then
-    echo "Warning: Creating more than 1000 proxies might cause issues. Limiting to 1000."
-    COUNT=1000
+# Kiểm tra tài nguyên hệ thống
+AVAILABLE_MEMORY=$(free -m | awk '/^Mem:/{print $7}')
+REQUIRED_MEMORY=$((COUNT * 2)) # Giả sử mỗi proxy cần 2MB RAM
+
+if [ $AVAILABLE_MEMORY -lt $REQUIRED_MEMORY ]; then
+    echo "Warning: You may not have enough memory to create $COUNT proxies."
+    echo "Available memory: ${AVAILABLE_MEMORY}MB, Required: ${REQUIRED_MEMORY}MB"
+    echo "Do you want to continue? (y/n)"
+    read CONTINUE
+    if [ "$CONTINUE" != "y" ]; then
+        echo "Aborting..."
+        exit 1
+    fi
 fi
 
 FIRST_PORT=10000
@@ -109,15 +118,10 @@ chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
 
-# Tăng giới hạn file mở
+# Increase system limits
 echo "* soft nofile 1000000" >> /etc/security/limits.conf
 echo "* hard nofile 1000000" >> /etc/security/limits.conf
 echo "session required pam_limits.so" >> /etc/pam.d/common-session
-
-# Tăng giới hạn số lượng file mô tả
-echo "fs.file-max = 2097152" >> /etc/sysctl.conf
-echo "net.ipv4.ip_local_port_range = 1024 65000" >> /etc/sysctl.conf
-sysctl -p
 
 cat >/etc/systemd/system/3proxy.service <<EOF
 [Unit]
@@ -142,17 +146,24 @@ systemctl enable 3proxy
 bash ${WORKDIR}/boot_iptables.sh
 bash ${WORKDIR}/boot_ifconfig.sh
 
+# Thêm quy tắc tường lửa cho các cổng 3proxy
+for port in $(seq $FIRST_PORT $LAST_PORT); do
+    firewall-cmd --permanent --add-port=${port}/tcp
+done
+firewall-cmd --reload
+
 gen_proxy_file_for_user
 
-print_proxy
-
+echo "Starting 3proxy..."
 systemctl start 3proxy
 
-echo "3proxy has been installed and configured. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
-echo "You can check the status of 3proxy by running: systemctl status 3proxy"
+echo "Waiting for 3proxy to initialize..."
+sleep 10
 
 if systemctl is-active --quiet 3proxy; then
     echo "3proxy is running."
+    echo "Here are your proxy details:"
+    cat proxy.txt
 else
     echo "3proxy failed to start. Check the logs with: journalctl -u 3proxy"
 fi
@@ -164,30 +175,16 @@ echo "Listening ports:"
 ss -tuln | grep 3proxy
 
 echo "Firewall status:"
-if command -v firewall-cmd &> /dev/null; then
-    firewall-cmd --list-all
-elif command -v iptables &> /dev/null; then
-    iptables -L -n
-else
-    echo "No firewall detected"
-fi
+firewall-cmd --list-all
 
-# Kiểm tra và khởi động lại nếu cần
-if ! pgrep -x "3proxy" > /dev/null; then
-    echo "3proxy is not running. Attempting to start..."
-    systemctl start 3proxy
-    sleep 5
-    if pgrep -x "3proxy" > /dev/null; then
-        echo "3proxy has been successfully started."
+# Kiểm tra kết nối
+echo "Testing proxy connections..."
+for port in $(seq $FIRST_PORT $LAST_PORT); do
+    if nc -z localhost $port; then
+        echo "Port $port is open and accessible"
     else
-        echo "Failed to start 3proxy. Please check the logs."
+        echo "Port $port is not accessible"
     fi
-fi
+done
 
-# Kiểm tra tài nguyên hệ thống
-echo "System resources:"
-free -m
-df -h
-ulimit -n
-
-echo "Script completed. Please test your proxies."
+echo "Proxy creation completed. The list of proxies has been printed above and saved to proxy.txt."
