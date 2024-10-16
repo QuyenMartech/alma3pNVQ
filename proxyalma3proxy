@@ -34,14 +34,14 @@ gen_3proxy() {
     cat <<EOF
 daemon
 maxconn 2000
-nscache 65536
+nscache 65535
 timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
 setuid 65535
 flush
 auth none
 
-$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA} | sed 's/$/\n/')
+$(awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' ${WORKDATA})
 EOF
 }
 
@@ -93,13 +93,6 @@ echo "Internal IP = ${IP4}. External subnet for IPv6 = ${IP6}"
 echo "How many proxies do you want to create? Example: 500"
 read COUNT
 
-# Giới hạn số lượng proxy tối đa
-MAX_PROXIES=1000
-if [ $COUNT -gt $MAX_PROXIES ]; then
-    echo "Warning: Number of proxies limited to $MAX_PROXIES"
-    COUNT=$MAX_PROXIES
-fi
-
 FIRST_PORT=10000
 LAST_PORT=$(($FIRST_PORT + $COUNT - 1))
 
@@ -109,19 +102,6 @@ gen_ifconfig >$WORKDIR/boot_ifconfig.sh
 chmod +x ${WORKDIR}/boot_*.sh
 
 gen_3proxy >/usr/local/etc/3proxy/3proxy.cfg
-
-echo "3proxy configuration file created. Checking content:"
-cat /usr/local/etc/3proxy/3proxy.cfg
-
-echo "Number of proxy entries:"
-grep -c "proxy -6" /usr/local/etc/3proxy/3proxy.cfg
-
-if /usr/local/etc/3proxy/bin/3proxy -C /usr/local/etc/3proxy/3proxy.cfg; then
-    echo "3proxy configuration syntax is correct."
-else
-    echo "Error in 3proxy configuration. Please check the file."
-    exit 1
-fi
 
 echo "* soft nofile 65535" >> /etc/security/limits.conf
 echo "* hard nofile 65535" >> /etc/security/limits.conf
@@ -161,14 +141,6 @@ gen_proxy_file_for_user
 print_proxy
 
 systemctl start 3proxy
-sleep 5
-if systemctl is-active --quiet 3proxy; then
-    echo "3proxy started successfully."
-    journalctl -u 3proxy --no-pager | tail -n 50
-else
-    echo "Failed to start 3proxy. Check logs:"
-    journalctl -u 3proxy --no-pager | tail -n 50
-fi
 
 echo "3proxy has been installed and configured. Check /usr/local/etc/3proxy/logs/3proxy.log for logs."
 echo "You can check the status of 3proxy by running: systemctl status 3proxy"
