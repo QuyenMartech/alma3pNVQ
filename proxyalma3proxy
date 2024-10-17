@@ -7,7 +7,7 @@ if [ "$(id -u)" != "0" ]; then
 fi
 
 random() {
-    tr </dev/urandom -dc A-Za-z0-9 | head -c5
+    tr </dev/urandom -dc A-Za-z0-9 | head -c8
     echo
 }
 
@@ -39,23 +39,12 @@ timeouts 1 5 30 60 180 1800 15 60
 setgid 65535
 setuid 65535
 flush
-auth none
+auth strong
 
+users $(awk -F "/" 'BEGIN{ORS="";} {print $1 ":CL:" $2 " "}' ${WORKDATA})
+
+$(awk -F "/" '{print "auth strong\nallow " $1 "\nproxy -6 -n -a -p" $4 " -i" $3 " -e"$5 "\n"}' ${WORKDATA})
 EOF
-
-    # Chia nhỏ cấu hình proxy thành nhiều file
-    local proxy_count=$(wc -l < ${WORKDATA})
-    local files_needed=$(( (proxy_count + 49) / 50 ))
-    
-    for i in $(seq 1 $files_needed); do
-        local start_line=$(( (i-1)*50 + 1 ))
-        local end_line=$(( i*50 ))
-        
-        sed -n "${start_line},${end_line}p" ${WORKDATA} | \
-        awk -F "/" '{print "proxy -6 -n -a -p" $4 " -i" $3 " -e"$5}' > /usr/local/etc/3proxy/proxy_conf_${i}.txt
-        
-        echo "include /usr/local/etc/3proxy/proxy_conf_${i}.txt" >> /usr/local/etc/3proxy/3proxy.cfg
-    done
 }
 
 gen_proxy_file_for_user() {
