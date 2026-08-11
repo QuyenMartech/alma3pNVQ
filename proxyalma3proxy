@@ -3,11 +3,10 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
-# v5 - FIX THAT SU: lenh 'log' phai dat TRUOC setuid/setgid
-#      (3proxy xu ly config tuan tu; sau setuid 65535 thi
-#       nobody khong tao duoc file log trong thu muc root)
-#      + chown thu muc logs cho rotate hoat dong
-#      + smoke test config truoc khi tao service
+# v6 - FIX SELinux: systemd KHONG duoc exec file duoi /home
+#      -> chuyen boot_ifconfig.sh sang /usr/local/etc/3proxy/bin
+#      -> ExecStartPre dung /bin/bash <script> (chi can quyen doc)
+#      -> PIDFile chuyen sang /run (bo canh bao legacy /var/run)
 # =============================================================
 
 set -e
@@ -22,8 +21,9 @@ WORKDATA="${WORKDIR}/data.txt"
 THREEPROXY_DIR="${WORKDIR}/3proxy-3proxy-0.8.6"
 INSTALL_DIR="/usr/local/etc/3proxy"
 BINARY="${INSTALL_DIR}/bin/3proxy"
+IPV6_SCRIPT="${INSTALL_DIR}/bin/boot_ifconfig.sh"
 CONFIG="${INSTALL_DIR}/3proxy.cfg"
-PIDFILE="/var/run/3proxy.pid"
+PIDFILE="/run/3proxy.pid"
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -81,6 +81,9 @@ fi
 
 echo ">>> Main network interface: $ETH_MAIN"
 
+# Hien thi trang thai SELinux de de debug
+echo ">>> SELinux status: $(getenforce 2>/dev/null || echo 'not installed')"
+
 # -------------------------------------------------------------
 # Cai dat 3proxy (fix loi GCC 10+ bang -fcommon)
 # -------------------------------------------------------------
@@ -122,7 +125,7 @@ install_3proxy() {
     mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
     install -m 0755 src/3proxy "$BINARY"
 
-    # [FIX v5] 3proxy chay duoi quyen nobody (65535) sau setuid.
+    # 3proxy chay duoi quyen nobody (65535) sau setuid.
     # Thu muc logs/stat phai ghi duoc boi nobody thi lenh 'rotate'
     # (tao file log moi luc 0h) moi khong lam chet dich vu.
     chown -R 65535:65535 "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
@@ -146,7 +149,8 @@ generate_data() {
 }
 
 # -------------------------------------------------------------
-# Sinh script gan IPv6
+# [FIX v6] Sinh script gan IPv6 tai /usr/local/etc/3proxy/bin
+# (tranh SELinux chan exec file duoi /home)
 # -------------------------------------------------------------
 
 generate_ipv6_script() {
@@ -155,18 +159,18 @@ generate_ipv6_script() {
         awk -F "/" -v iface="$ETH_MAIN" \
             '{ print "ip -6 addr add " $5 "/64 dev " iface " nodad 2>/dev/null || true" }' \
             "$WORKDATA"
-    } > "${WORKDIR}/boot_ifconfig.sh"
+    } > "$IPV6_SCRIPT"
 
-    chmod 0755 "${WORKDIR}/boot_ifconfig.sh"
+    chmod 0755 "$IPV6_SCRIPT"
 
     local lines
-    lines="$(wc -l < "${WORKDIR}/boot_ifconfig.sh")"
+    lines="$(wc -l < "$IPV6_SCRIPT")"
 
-    echo ">>> boot_ifconfig.sh generated: $lines lines"
+    echo ">>> boot_ifconfig.sh generated: $lines lines at $IPV6_SCRIPT"
     echo ">>> Sample:"
-    sed -n '1,3p' "${WORKDIR}/boot_ifconfig.sh"
+    sed -n '1,3p' "$IPV6_SCRIPT"
 
-    if grep -q '\\' "${WORKDIR}/boot_ifconfig.sh"; then
+    if grep -q '\\' "$IPV6_SCRIPT"; then
         echo "ERROR: boot_ifconfig.sh contains literal backslash - generation failed."
         exit 1
     fi
@@ -178,13 +182,8 @@ generate_ipv6_script() {
 }
 
 # -------------------------------------------------------------
-# [FIX v5 - QUAN TRONG NHAT] Cau hinh 3proxy
-# 3proxy 0.8.6 thuc thi config TUAN TU tung dong.
-# => log/logformat/rotate phai dat TRUOC setgid/setuid,
-#    vi sau setuid tien trinh la nobody, khong tao duoc
-#    file log trong thu muc cua root -> huy khoi dong.
-# -------------------------------------------------------------
-# Thu tu bat buoc:
+# Cau hinh 3proxy
+# Thu tu bat buoc (3proxy 0.8.6 thuc thi config TUAN TU):
 #   pidfile -> maxconn -> dns -> timeouts -> flush -> auth
 #   -> LOG BLOCK (khi con la root) -> users -> setgid/setuid
 #   -> cac dong proxy/socks
@@ -229,8 +228,8 @@ EOF
 }
 
 # -------------------------------------------------------------
-# [FIX v5] Smoke test: chay thu 3proxy 3 giay de bat loi config
-# TRUOC khi tao service - thay vi de systemd bao loi chung chung
+# Smoke test: chay thu 3proxy 3 giay de bat loi config
+# TRUOC khi tao service
 # -------------------------------------------------------------
 
 smoke_test_config() {
@@ -240,7 +239,6 @@ smoke_test_config() {
     sleep 1
     rm -f "$PIDFILE"
 
-    # Chay thu o background, bat stderr de hien loi config neu co
     "$BINARY" "$CONFIG" 2>"${WORKDIR}/smoke.err" &
     local test_pid=$!
     sleep 3
@@ -302,7 +300,10 @@ configure_limits() {
 }
 
 # -------------------------------------------------------------
-# systemd unit (giu nguyen chuan v4: forking + PIDFile)
+# [FIX v6] systemd unit
+# - ExecStartPre dung /bin/bash <script>: chi can quyen DOC,
+#   khong bi SELinux chan exec nhu file duoi /home
+# - PIDFile dung /run thay /var/run
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -315,7 +316,7 @@ Wants=network-online.target
 [Service]
 Type=forking
 PIDFile=${PIDFILE}
-ExecStartPre=${WORKDIR}/boot_ifconfig.sh
+ExecStartPre=/bin/bash ${IPV6_SCRIPT}
 ExecStart=${BINARY} ${CONFIG}
 Restart=always
 RestartSec=5
@@ -358,7 +359,7 @@ configure_firewall() {
 apply_ipv6_addresses() {
     echo ">>> Applying IPv6 addresses"
 
-    bash "${WORKDIR}/boot_ifconfig.sh"
+    bash "$IPV6_SCRIPT"
     sleep 2
 
     local assigned
@@ -534,6 +535,7 @@ echo "Installation completed."
 echo "HTTP list:   ${WORKDIR}/proxy_http.txt"
 echo "SOCKS5 list: ${WORKDIR}/proxy_socks5.txt"
 echo "Config:      ${CONFIG}"
+echo "IPv6 script: ${IPV6_SCRIPT}"
 echo "Logs:        ${INSTALL_DIR}/logs/3proxy.log"
 echo
 echo "Useful commands:"
