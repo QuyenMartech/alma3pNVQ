@@ -3,10 +3,9 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
-# v6 - FIX SELinux: systemd KHONG duoc exec file duoi /home
-#      -> chuyen boot_ifconfig.sh sang /usr/local/etc/3proxy/bin
-#      -> ExecStartPre dung /bin/bash <script> (chi can quyen doc)
-#      -> PIDFile chuyen sang /run (bo canh bao legacy /var/run)
+# v7 - FIX CUOI: Type=simple (3proxy chay foreground, khong
+#      daemon) - khac phuc loi 'start operation timed out'
+#      o v6 (Type=forking + non-daemon = systemd cho mai)
 # =============================================================
 
 set -e
@@ -23,7 +22,6 @@ INSTALL_DIR="/usr/local/etc/3proxy"
 BINARY="${INSTALL_DIR}/bin/3proxy"
 IPV6_SCRIPT="${INSTALL_DIR}/bin/boot_ifconfig.sh"
 CONFIG="${INSTALL_DIR}/3proxy.cfg"
-PIDFILE="/run/3proxy.pid"
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -80,8 +78,6 @@ if [ -z "$ETH_MAIN" ]; then
 fi
 
 echo ">>> Main network interface: $ETH_MAIN"
-
-# Hien thi trang thai SELinux de de debug
 echo ">>> SELinux status: $(getenforce 2>/dev/null || echo 'not installed')"
 
 # -------------------------------------------------------------
@@ -149,7 +145,7 @@ generate_data() {
 }
 
 # -------------------------------------------------------------
-# [FIX v6] Sinh script gan IPv6 tai /usr/local/etc/3proxy/bin
+# Sinh script gan IPv6 tai /usr/local/etc/3proxy/bin
 # (tranh SELinux chan exec file duoi /home)
 # -------------------------------------------------------------
 
@@ -182,9 +178,10 @@ generate_ipv6_script() {
 }
 
 # -------------------------------------------------------------
-# Cau hinh 3proxy
+# [v7] Cau hinh 3proxy - KHONG pidfile, KHONG daemon
+# (Type=simple: systemd tu quan ly tien trinh qua cgroup)
 # Thu tu bat buoc (3proxy 0.8.6 thuc thi config TUAN TU):
-#   pidfile -> maxconn -> dns -> timeouts -> flush -> auth
+#   maxconn -> dns -> timeouts -> flush -> auth
 #   -> LOG BLOCK (khi con la root) -> users -> setgid/setuid
 #   -> cac dong proxy/socks
 # -------------------------------------------------------------
@@ -196,7 +193,6 @@ generate_3proxy_config() {
     [ "$maxconn" -gt 10000 ] && maxconn=10000
 
     cat > "$CONFIG" <<EOF
-pidfile ${PIDFILE}
 maxconn ${maxconn}
 
 nscache 65535
@@ -237,7 +233,6 @@ smoke_test_config() {
 
     pkill -x 3proxy 2>/dev/null || true
     sleep 1
-    rm -f "$PIDFILE"
 
     "$BINARY" "$CONFIG" 2>"${WORKDIR}/smoke.err" &
     local test_pid=$!
@@ -248,7 +243,6 @@ smoke_test_config() {
         kill "$test_pid" 2>/dev/null || true
         sleep 1
         pkill -x 3proxy 2>/dev/null || true
-        rm -f "$PIDFILE"
         return 0
     fi
 
@@ -300,10 +294,12 @@ configure_limits() {
 }
 
 # -------------------------------------------------------------
-# [FIX v6] systemd unit
-# - ExecStartPre dung /bin/bash <script>: chi can quyen DOC,
-#   khong bi SELinux chan exec nhu file duoi /home
-# - PIDFile dung /run thay /var/run
+# [FIX v7 - QUAN TRONG] systemd unit voi Type=simple
+# 3proxy chay FOREGROUND (khong daemon) -> Type=simple la
+# dung chuan: tien trinh ExecStart chinh la tien trinh dich vu.
+# Type=forking + non-daemon (loi v6) -> systemd cho pidfile/
+# fork mai khong thay -> timeout sau 90s.
+# TimeoutStartSec=30: 3proxy start <2s, tranh cho 90s mac dinh.
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -314,10 +310,11 @@ After=network-online.target
 Wants=network-online.target
 
 [Service]
-Type=forking
-PIDFile=${PIDFILE}
+Type=simple
+TimeoutStartSec=30
 ExecStartPre=/bin/bash ${IPV6_SCRIPT}
 ExecStart=${BINARY} ${CONFIG}
+ExecReload=/bin/kill -USR1 \$MAINPID
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -499,7 +496,6 @@ echo ">>> Starting 3proxy"
 
 pkill -x 3proxy 2>/dev/null || true
 sleep 1
-rm -f "$PIDFILE"
 
 if ! systemctl restart 3proxy; then
     echo "ERROR: 3proxy failed to start. Diagnostic info:"
@@ -518,7 +514,7 @@ if ! systemctl is-active --quiet 3proxy; then
     exit 1
 fi
 
-echo ">>> 3proxy is running (PID: $(cat $PIDFILE 2>/dev/null || pgrep -x 3proxy | head -1))"
+echo ">>> 3proxy is running (PID: $(pgrep -x 3proxy | head -1))"
 
 generate_proxy_lists
 
