@@ -3,7 +3,8 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
-# v3 - fix loi sinh file boot_ifconfig.sh (nodadnip)
+# v4 - fix systemd unit (bo RemAfterExit mau thuan voi forking,
+#      chay 3proxy foreground + PIDFile)
 # =============================================================
 
 set -e
@@ -19,6 +20,7 @@ THREEPROXY_DIR="${WORKDIR}/3proxy-3proxy-0.8.6"
 INSTALL_DIR="/usr/local/etc/3proxy"
 BINARY="${INSTALL_DIR}/bin/3proxy"
 CONFIG="${INSTALL_DIR}/3proxy.cfg"
+PIDFILE="/var/run/3proxy.pid"
 
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
@@ -136,9 +138,7 @@ generate_data() {
 }
 
 # -------------------------------------------------------------
-# [FIX CHINH] Sinh script gan IPv6
-# Dung awk 'print' (tu them newline) thay vi printf ... \\n
-# Dung 'add ... || true' thay vi 'replace' de chay lai nhieu lan
+# Sinh script gan IPv6 (da fix loi nodadnip o v3)
 # -------------------------------------------------------------
 
 generate_ipv6_script() {
@@ -151,7 +151,6 @@ generate_ipv6_script() {
 
     chmod 0755 "${WORKDIR}/boot_ifconfig.sh"
 
-    # Tu kiem tra file vua sinh
     local lines
     lines="$(wc -l < "${WORKDIR}/boot_ifconfig.sh")"
 
@@ -159,7 +158,6 @@ generate_ipv6_script() {
     echo ">>> Sample:"
     sed -n '1,3p' "${WORKDIR}/boot_ifconfig.sh"
 
-    # Moi dong ip phai bat dau dung chuan, khong chua ky tu '\'
     if grep -q '\\' "${WORKDIR}/boot_ifconfig.sh"; then
         echo "ERROR: boot_ifconfig.sh contains literal backslash - generation failed."
         exit 1
@@ -172,7 +170,8 @@ generate_ipv6_script() {
 }
 
 # -------------------------------------------------------------
-# Tao cau hinh 3proxy
+# [FIX v4] Cau hinh 3proxy: BO 'daemon', them 'pidfile'
+# -> chay foreground, systemd quan ly tien trinh truc tiep
 # -------------------------------------------------------------
 
 generate_3proxy_config() {
@@ -182,7 +181,7 @@ generate_3proxy_config() {
     [ "$maxconn" -gt 50000 ] && maxconn=50000
 
     cat > "$CONFIG" <<EOF
-daemon
+pidfile ${PIDFILE}
 maxconn ${maxconn}
 
 nscache 65535
@@ -253,7 +252,10 @@ configure_limits() {
 }
 
 # -------------------------------------------------------------
-# systemd service
+# [FIX v4] systemd unit viet lai dung chuan
+# - Type=forking + PIDFile (khop voi 'pidfile' trong config)
+# - BO RemainAfterExit (nguyen nhan loi start failed)
+# - Restart=always
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -265,12 +267,12 @@ Wants=network-online.target
 
 [Service]
 Type=forking
+PIDFile=${PIDFILE}
 ExecStartPre=${WORKDIR}/boot_ifconfig.sh
 ExecStart=${BINARY} ${CONFIG}
-ExecStop=/bin/kill -TERM \$MAINPID
-Restart=on-failure
+ExecReload=/bin/kill -USR1 \$MAINPID
+Restart=always
 RestartSec=5
-RemainAfterExit=yes
 LimitNOFILE=65535
 
 [Install]
@@ -445,16 +447,28 @@ configure_firewall
 
 echo ">>> Starting 3proxy"
 
-systemctl restart 3proxy
-sleep 3
+# Don dep tien trinh 3proxy cu neu co (tranh conflict port khi chay lai)
+pkill -x 3proxy 2>/dev/null || true
+sleep 1
 
-if ! systemctl is-active --quiet 3proxy; then
-    echo "ERROR: 3proxy failed to start."
-    journalctl -u 3proxy --no-pager -n 50
+if ! systemctl restart 3proxy; then
+    echo "ERROR: 3proxy failed to start. Diagnostic info:"
+    echo "------------------------------------------------------------"
+    systemctl status 3proxy --no-pager || true
+    journalctl -u 3proxy --no-pager -n 30 || true
+    echo "------------------------------------------------------------"
     exit 1
 fi
 
-echo ">>> 3proxy is running"
+sleep 3
+
+if ! systemctl is-active --quiet 3proxy; then
+    echo "ERROR: 3proxy is not active after restart."
+    journalctl -u 3proxy --no-pager -n 30
+    exit 1
+fi
+
+echo ">>> 3proxy is running (PID: $(cat $PIDFILE 2>/dev/null || pgrep -x 3proxy | head -1))"
 
 generate_proxy_lists
 
