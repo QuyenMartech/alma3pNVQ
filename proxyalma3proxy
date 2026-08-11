@@ -3,9 +3,9 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
-# v7 - FIX CUOI: Type=simple (3proxy chay foreground, khong
-#      daemon) - khac phuc loi 'start operation timed out'
-#      o v6 (Type=forking + non-daemon = systemd cho mai)
+# v8 - Them bo chan doan mang 5 tang de xac dinh chinh xac
+#      nguyen nhan proxy khong hoat dong (thay vi chi bao FAILED)
+#      + Ho tro che do IPv4-only fallback neu /64 khong duoc route
 # =============================================================
 
 set -e
@@ -121,9 +121,6 @@ install_3proxy() {
     mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
     install -m 0755 src/3proxy "$BINARY"
 
-    # 3proxy chay duoi quyen nobody (65535) sau setuid.
-    # Thu muc logs/stat phai ghi duoc boi nobody thi lenh 'rotate'
-    # (tao file log moi luc 0h) moi khong lam chet dich vu.
     chown -R 65535:65535 "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
 
     echo ">>> 3proxy binary installed successfully"
@@ -146,7 +143,6 @@ generate_data() {
 
 # -------------------------------------------------------------
 # Sinh script gan IPv6 tai /usr/local/etc/3proxy/bin
-# (tranh SELinux chan exec file duoi /home)
 # -------------------------------------------------------------
 
 generate_ipv6_script() {
@@ -163,11 +159,9 @@ generate_ipv6_script() {
     lines="$(wc -l < "$IPV6_SCRIPT")"
 
     echo ">>> boot_ifconfig.sh generated: $lines lines at $IPV6_SCRIPT"
-    echo ">>> Sample:"
-    sed -n '1,3p' "$IPV6_SCRIPT"
 
     if grep -q '\\' "$IPV6_SCRIPT"; then
-        echo "ERROR: boot_ifconfig.sh contains literal backslash - generation failed."
+        echo "ERROR: boot_ifconfig.sh contains literal backslash."
         exit 1
     fi
 
@@ -178,10 +172,8 @@ generate_ipv6_script() {
 }
 
 # -------------------------------------------------------------
-# [v7] Cau hinh 3proxy - KHONG pidfile, KHONG daemon
-# (Type=simple: systemd tu quan ly tien trinh qua cgroup)
-# Thu tu bat buoc (3proxy 0.8.6 thuc thi config TUAN TU):
-#   maxconn -> dns -> timeouts -> flush -> auth
+# Cau hinh 3proxy
+# Thu tu: maxconn -> dns -> timeouts -> flush -> auth
 #   -> LOG BLOCK (khi con la root) -> users -> setgid/setuid
 #   -> cac dong proxy/socks
 # -------------------------------------------------------------
@@ -224,8 +216,7 @@ EOF
 }
 
 # -------------------------------------------------------------
-# Smoke test: chay thu 3proxy 3 giay de bat loi config
-# TRUOC khi tao service
+# Smoke test: chay thu 3proxy 3 giay
 # -------------------------------------------------------------
 
 smoke_test_config() {
@@ -248,7 +239,6 @@ smoke_test_config() {
 
     echo "============================================================"
     echo "ERROR: 3proxy exited immediately - CONFIG ERROR."
-    echo "3proxy says:"
     cat "${WORKDIR}/smoke.err"
     echo "============================================================"
     exit 1
@@ -272,14 +262,12 @@ get_public_ips() {
         exit 1
     fi
 
-    if [ -z "$IP6" ]; then
-        echo "ERROR: Cannot detect public IPv6."
-        echo "The VPS must have a routed IPv6 prefix."
-        exit 1
-    fi
-
     echo ">>> Public IPv4: $IP4"
-    echo ">>> IPv6 prefix: ${IP6}::/64"
+    if [ -n "$IP6" ]; then
+        echo ">>> IPv6 prefix: ${IP6}::/64"
+    else
+        echo ">>> IPv6: khong co (se dung IPv4-only mode)"
+    fi
 }
 
 # -------------------------------------------------------------
@@ -294,12 +282,7 @@ configure_limits() {
 }
 
 # -------------------------------------------------------------
-# [FIX v7 - QUAN TRONG] systemd unit voi Type=simple
-# 3proxy chay FOREGROUND (khong daemon) -> Type=simple la
-# dung chuan: tien trinh ExecStart chinh la tien trinh dich vu.
-# Type=forking + non-daemon (loi v6) -> systemd cho pidfile/
-# fork mai khong thay -> timeout sau 90s.
-# TimeoutStartSec=30: 3proxy start <2s, tranh cho 90s mac dinh.
+# systemd unit - Type=simple (3proxy chay foreground)
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -350,24 +333,25 @@ configure_firewall() {
 }
 
 # -------------------------------------------------------------
-# Gan IPv6 va kiem tra that
+# Gan IPv6 va kiem tra
 # -------------------------------------------------------------
 
 apply_ipv6_addresses() {
-    echo ">>> Applying IPv6 addresses"
+    if [ -z "$IP6" ]; then
+        echo ">>> Bo qua gan IPv6 (IPv4-only mode)"
+        return 0
+    fi
 
+    echo ">>> Applying IPv6 addresses"
     bash "$IPV6_SCRIPT"
     sleep 2
 
     local assigned
     assigned="$(ip -6 addr show dev "$ETH_MAIN" | grep -c 'inet6' || true)"
-
-    echo ">>> IPv6 addresses currently assigned: $assigned (expected $((COUNT + 1)))"
+    echo ">>> IPv6 addresses currently assigned: $assigned"
 
     if [ "$assigned" -lt 2 ]; then
-        echo "ERROR: IPv6 addresses were not assigned correctly."
-        echo "Check whether your provider routes a /64 prefix to this VPS."
-        exit 1
+        echo "WARNING: IPv6 gan that bai - se kiem tra o buoc chan doan."
     fi
 }
 
@@ -389,55 +373,203 @@ generate_proxy_lists() {
 }
 
 # -------------------------------------------------------------
-# Test bang request that
+# [v8 MOI] Bo chan doan mang 5 tang
+# Tang 1: 3proxy co LISTEN dung port khong?
+# Tang 2: Port co bi firewall OS chan khong?
+# Tang 3: IPv6 exit co bind duoc khong?
+# Tang 4: IPv6 co ra duoc internet khong? (route /64)
+# Tang 5: Request qua proxy co thanh cong khong?
 # -------------------------------------------------------------
 
-test_proxy() {
-    local first_line user pass ip port socks_port result_http result_socks
-
+diagnose_network() {
+    local first_line user pass ip port socks_port ipv6_exit
     first_line="$(head -n 1 "$WORKDATA")"
     user="$(echo "$first_line" | cut -d/ -f1)"
     pass="$(echo "$first_line" | cut -d/ -f2)"
     ip="$(echo "$first_line"   | cut -d/ -f3)"
     port="$(echo "$first_line" | cut -d/ -f4)"
     socks_port=$((port + 20000))
+    ipv6_exit="$(echo "$first_line" | cut -d/ -f5)"
 
-    echo ">>> Testing HTTP proxy ${ip}:${port} ..."
-    result_http="$(
-        curl -4 -sS --max-time 20 \
+    echo ""
+    echo "========================================================"
+    echo "  NETWORK DIAGNOSTICS - Phan tich 5 tang"
+    echo "========================================================"
+
+    # --- Tang 1: 3proxy LISTEN ---
+    echo ""
+    echo "[TANG 1] 3proxy co dang LISTEN tren port $port?"
+    if ss -lnt | grep -q ":${port} "; then
+        echo "  [OK] Port $port dang LISTEN"
+    else
+        echo "  [FAIL] Port $port KHONG LISTEN - 3proxy khong bind duoc"
+        echo "  Kiem tra: journalctl -u 3proxy -n 20"
+        return 1
+    fi
+
+    # --- Tang 2: firewall OS ---
+    echo ""
+    echo "[TANG 2] Firewall OS co cho phep port $port?"
+    if firewall-cmd --list-ports 2>/dev/null | grep -q "10000-29999"; then
+        echo "  [OK] firewalld da mo dai 10000-29999/tcp"
+    else
+        echo "  [FAIL] firewalld chua mo port - kiem tra: firewall-cmd --list-ports"
+    fi
+
+    # --- Tang 3: IPv6 exit co ton tai tren interface khong ---
+    echo ""
+    echo "[TANG 3] IPv6 exit $ipv6_exit co duoc gan tren $ETH_MAIN?"
+    if ip -6 addr show dev "$ETH_MAIN" | grep -q "$ipv6_exit"; then
+        echo "  [OK] IPv6 $ipv6_exit da duoc gan"
+    else
+        echo "  [FAIL] IPv6 $ipv6_exit KHONG ton tai tren $ETH_MAIN"
+        echo "  Kiem tra: bash $IPV6_SCRIPT"
+        return 1
+    fi
+
+    # --- Tang 4: IPv6 exit co ra duoc internet khong ---
+    echo ""
+    echo "[TANG 4] IPv6 $ipv6_exit co route ra internet?"
+    local test_v6
+    test_v6=$(curl -6 -sS --max-time 10 --interface "$ipv6_exit" https://api64.ipify.org 2>/dev/null || echo "FAILED")
+
+    if [ "$test_v6" != "FAILED" ] && [ -n "$test_v6" ]; then
+        echo "  [OK] IPv6 ra internet thanh cong: $test_v6"
+    else
+        echo "  [FAIL] IPv6 $ipv6_exit KHONG ra duoc internet"
+        echo ""
+        echo "  ============================================"
+        echo "  NGUYEN NHAN: Provider (Vultr) CHUA route /64"
+        echo "  ve VPS nay. IPv6 duoc gan nhung khong co"
+        echo "  duong di tren internet."
+        echo ""
+        echo "  CACH KHAC PHUC:"
+        echo "  1. Dang nhap Vultr Panel -> VPS -> Settings"
+        echo "     -> IPv6 -> kiem tra co 'Routed Subnet'"
+        echo "  2. Neu chi co 1 IPv6 /128: lien he support"
+        echo "     yeu cau route ca /64 ve VPS"
+        echo "  3. Hoac chuyen sang che do IPv4-only"
+        echo "     (proxy van hoat dong, exit bang IPv4)"
+        echo "  ============================================"
+        echo ""
+        read -r -p "Ban co muon chuyen sang IPv4-only mode? (y/n): " V4_ONLY
+        if [[ "$V4_ONLY" =~ ^[Yy]$ ]]; then
+            convert_to_ipv4_only
+            return 2
+        fi
+        return 1
+    fi
+
+    # --- Tang 5: Test qua proxy ---
+    echo ""
+    echo "[TANG 5] Test request thuc qua proxy..."
+
+    local result_http result_socks
+    result_http=$(curl -4 -sS --max-time 20 \
+        --proxy "http://${user}:${pass}@${ip}:${port}" \
+        https://api.ipify.org 2>/dev/null || echo "FAILED")
+
+    result_socks=$(curl -4 -sS --max-time 20 \
+        --socks5-hostname "${user}:${pass}@${ip}:${socks_port}" \
+        https://api.ipify.org 2>/dev/null || echo "FAILED")
+
+    if [ "$result_http" != "FAILED" ] && [ -n "$result_http" ]; then
+        echo "  [OK] HTTP proxy hoat dong - Exit IP: $result_http"
+    else
+        echo "  [FAIL] HTTP proxy khong hoat dong"
+    fi
+
+    if [ "$result_socks" != "FAILED" ] && [ -n "$result_socks" ]; then
+        echo "  [OK] SOCKS5 proxy hoat dong - Exit IP: $result_socks"
+    else
+        echo "  [FAIL] SOCKS5 proxy khong hoat dong"
+    fi
+
+    if [ "$result_http" = "FAILED" ] && [ "$result_socks" = "FAILED" ]; then
+        echo ""
+        echo "  Proxy van khong hoat dong du 4 tang tren deu OK."
+        echo "  Nguyen nhan co the: Cloud Firewall tren Vultr Panel"
+        echo "  dang chan port ${port}. Kiem tra:"
+        echo "  Vultr Panel -> VPS -> Firewall -> Them rule allow TCP 10000-29999"
+        return 1
+    fi
+
+    echo ""
+    echo "  >>> TAT CA 5 TANG DEU OK <<<"
+    return 0
+}
+
+# -------------------------------------------------------------
+# [v8 MOI] Chuyen sang IPv4-only mode (proxy exit bang IPv4)
+# -------------------------------------------------------------
+
+convert_to_ipv4_only() {
+    echo ""
+    echo ">>> Chuyen sang IPv4-only mode..."
+    echo ">>> Tat ca proxy se exit bang IPv4: $IP4"
+
+    # Sinh lai config khong co -6 va -e IPv6
+    local maxconn
+    maxconn=$((COUNT * 5 + 1000))
+    [ "$maxconn" -gt 10000 ] && maxconn=10000
+
+    cat > "$CONFIG" <<EOF
+maxconn ${maxconn}
+
+nscache 65535
+nserver 1.1.1.1
+nserver 8.8.8.8
+nserver 9.9.9.9
+
+timeouts 1 5 30 60 180 1800 15 60
+
+flush
+auth strong
+
+log ${INSTALL_DIR}/logs/3proxy.log D
+logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
+rotate 30
+
+users $(awk -F "/" 'BEGIN{ORS=""} {print $1 ":CL:" $2 " "}' "$WORKDATA")
+
+setgid 65535
+setuid 65535
+
+$(awk -F "/" '{
+    print "auth strong"
+    print "allow " $1
+    print "proxy -n -a -p" $4 " -i" $3 " -e" $3
+    print "socks -a -p" ($4 + 20000) " -i" $3 " -e" $3
+}' "$WORKDATA")
+EOF
+
+    systemctl restart 3proxy
+    sleep 3
+
+    if systemctl is-active --quiet 3proxy; then
+        echo ">>> 3proxy restarted in IPv4-only mode"
+
+        # Test lai
+        local first_line user pass ip port
+        first_line="$(head -n 1 "$WORKDATA")"
+        user="$(echo "$first_line" | cut -d/ -f1)"
+        pass="$(echo "$first_line" | cut -d/ -f2)"
+        ip="$(echo "$first_line"   | cut -d/ -f3)"
+        port="$(echo "$first_line" | cut -d/ -f4)"
+
+        local result
+        result=$(curl -4 -sS --max-time 20 \
             --proxy "http://${user}:${pass}@${ip}:${port}" \
-            https://api.ipify.org 2>/dev/null || true
-    )"
+            https://api.ipify.org 2>/dev/null || echo "FAILED")
 
-    if [ -n "$result_http" ]; then
-        echo ">>> HTTP proxy OK. Exit IPv4: $result_http"
+        if [ "$result" != "FAILED" ] && [ -n "$result" ]; then
+            echo ">>> IPv4-only proxy OK! Exit IP: $result"
+        else
+            echo ">>> IPv4-only proxy van FAILED - kiem tra Cloud Firewall tren panel"
+        fi
     else
-        echo ">>> HTTP proxy test FAILED"
-    fi
-
-    echo ">>> Testing SOCKS5 proxy ${ip}:${socks_port} ..."
-    result_socks="$(
-        curl -4 -sS --max-time 20 \
-            --socks5-hostname "${user}:${pass}@${ip}:${socks_port}" \
-            https://api.ipify.org 2>/dev/null || true
-    )"
-
-    if [ -n "$result_socks" ]; then
-        echo ">>> SOCKS5 proxy OK. Exit IPv4: $result_socks"
-    else
-        echo ">>> SOCKS5 proxy test FAILED"
-    fi
-
-    if [ -z "$result_http" ] && [ -z "$result_socks" ]; then
-        echo
-        echo "WARNING: Both proxy tests failed. Possible causes:"
-        echo "1. Provider has not routed an IPv6 /64 to this VPS."
-        echo "2. Cloud provider firewall blocks the proxy ports."
-        echo
-        echo "Run:"
-        echo "  systemctl status 3proxy --no-pager"
-        echo "  journalctl -u 3proxy --no-pager -n 50"
-        echo "  tail -n 50 ${INSTALL_DIR}/logs/3proxy.log"
+        echo ">>> ERROR: 3proxy khong start duoc sau khi chuyen IPv4-only"
+        journalctl -u 3proxy --no-pager -n 20
     fi
 }
 
@@ -484,7 +616,6 @@ fi
 generate_ipv6_script
 generate_3proxy_config
 
-# Bat loi config NGAY TAI DAY, truoc khi tao service
 smoke_test_config
 
 configure_limits
@@ -498,11 +629,9 @@ pkill -x 3proxy 2>/dev/null || true
 sleep 1
 
 if ! systemctl restart 3proxy; then
-    echo "ERROR: 3proxy failed to start. Diagnostic info:"
-    echo "------------------------------------------------------------"
+    echo "ERROR: 3proxy failed to start."
     systemctl status 3proxy --no-pager || true
     journalctl -u 3proxy --no-pager -n 30 || true
-    echo "------------------------------------------------------------"
     exit 1
 fi
 
@@ -522,8 +651,8 @@ echo
 echo ">>> First proxy entries:"
 head -n 5 "${WORKDIR}/proxy_http.txt"
 
-echo
-test_proxy
+# Chay bo chan doan 5 tang
+diagnose_network
 
 echo
 echo "============================================================="
@@ -533,9 +662,4 @@ echo "SOCKS5 list: ${WORKDIR}/proxy_socks5.txt"
 echo "Config:      ${CONFIG}"
 echo "IPv6 script: ${IPV6_SCRIPT}"
 echo "Logs:        ${INSTALL_DIR}/logs/3proxy.log"
-echo
-echo "Useful commands:"
-echo "  systemctl status 3proxy --no-pager"
-echo "  journalctl -u 3proxy --no-pager -n 50"
-echo "  ss -lntp | grep 3proxy | head"
 echo "============================================================="
