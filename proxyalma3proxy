@@ -3,8 +3,11 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
-# v4 - fix systemd unit (bo RemAfterExit mau thuan voi forking,
-#      chay 3proxy foreground + PIDFile)
+# v5 - FIX THAT SU: lenh 'log' phai dat TRUOC setuid/setgid
+#      (3proxy xu ly config tuan tu; sau setuid 65535 thi
+#       nobody khong tao duoc file log trong thu muc root)
+#      + chown thu muc logs cho rotate hoat dong
+#      + smoke test config truoc khi tao service
 # =============================================================
 
 set -e
@@ -119,6 +122,11 @@ install_3proxy() {
     mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
     install -m 0755 src/3proxy "$BINARY"
 
+    # [FIX v5] 3proxy chay duoi quyen nobody (65535) sau setuid.
+    # Thu muc logs/stat phai ghi duoc boi nobody thi lenh 'rotate'
+    # (tao file log moi luc 0h) moi khong lam chet dich vu.
+    chown -R 65535:65535 "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
+
     echo ">>> 3proxy binary installed successfully"
 
     cd "$WORKDIR"
@@ -138,7 +146,7 @@ generate_data() {
 }
 
 # -------------------------------------------------------------
-# Sinh script gan IPv6 (da fix loi nodadnip o v3)
+# Sinh script gan IPv6
 # -------------------------------------------------------------
 
 generate_ipv6_script() {
@@ -170,15 +178,23 @@ generate_ipv6_script() {
 }
 
 # -------------------------------------------------------------
-# [FIX v4] Cau hinh 3proxy: BO 'daemon', them 'pidfile'
-# -> chay foreground, systemd quan ly tien trinh truc tiep
+# [FIX v5 - QUAN TRONG NHAT] Cau hinh 3proxy
+# 3proxy 0.8.6 thuc thi config TUAN TU tung dong.
+# => log/logformat/rotate phai dat TRUOC setgid/setuid,
+#    vi sau setuid tien trinh la nobody, khong tao duoc
+#    file log trong thu muc cua root -> huy khoi dong.
+# -------------------------------------------------------------
+# Thu tu bat buoc:
+#   pidfile -> maxconn -> dns -> timeouts -> flush -> auth
+#   -> LOG BLOCK (khi con la root) -> users -> setgid/setuid
+#   -> cac dong proxy/socks
 # -------------------------------------------------------------
 
 generate_3proxy_config() {
     local maxconn
 
     maxconn=$((COUNT * 5 + 1000))
-    [ "$maxconn" -gt 50000 ] && maxconn=50000
+    [ "$maxconn" -gt 10000 ] && maxconn=10000
 
     cat > "$CONFIG" <<EOF
 pidfile ${PIDFILE}
@@ -191,10 +207,7 @@ nserver 9.9.9.9
 
 timeouts 1 5 30 60 180 1800 15 60
 
-setgid 65535
-setuid 65535
 flush
-
 auth strong
 
 log ${INSTALL_DIR}/logs/3proxy.log D
@@ -203,6 +216,9 @@ rotate 30
 
 users $(awk -F "/" 'BEGIN{ORS=""} {print $1 ":CL:" $2 " "}' "$WORKDATA")
 
+setgid 65535
+setuid 65535
+
 $(awk -F "/" '{
     print "auth strong"
     print "allow " $1
@@ -210,6 +226,40 @@ $(awk -F "/" '{
     print "socks -6 -a -p" ($4 + 20000) " -i" $3 " -e" $5
 }' "$WORKDATA")
 EOF
+}
+
+# -------------------------------------------------------------
+# [FIX v5] Smoke test: chay thu 3proxy 3 giay de bat loi config
+# TRUOC khi tao service - thay vi de systemd bao loi chung chung
+# -------------------------------------------------------------
+
+smoke_test_config() {
+    echo ">>> Smoke testing 3proxy config (3s)..."
+
+    pkill -x 3proxy 2>/dev/null || true
+    sleep 1
+    rm -f "$PIDFILE"
+
+    # Chay thu o background, bat stderr de hien loi config neu co
+    "$BINARY" "$CONFIG" 2>"${WORKDIR}/smoke.err" &
+    local test_pid=$!
+    sleep 3
+
+    if kill -0 "$test_pid" 2>/dev/null; then
+        echo ">>> Smoke test PASSED - config is valid"
+        kill "$test_pid" 2>/dev/null || true
+        sleep 1
+        pkill -x 3proxy 2>/dev/null || true
+        rm -f "$PIDFILE"
+        return 0
+    fi
+
+    echo "============================================================"
+    echo "ERROR: 3proxy exited immediately - CONFIG ERROR."
+    echo "3proxy says:"
+    cat "${WORKDIR}/smoke.err"
+    echo "============================================================"
+    exit 1
 }
 
 # -------------------------------------------------------------
@@ -252,10 +302,7 @@ configure_limits() {
 }
 
 # -------------------------------------------------------------
-# [FIX v4] systemd unit viet lai dung chuan
-# - Type=forking + PIDFile (khop voi 'pidfile' trong config)
-# - BO RemainAfterExit (nguyen nhan loi start failed)
-# - Restart=always
+# systemd unit (giu nguyen chuan v4: forking + PIDFile)
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -270,7 +317,6 @@ Type=forking
 PIDFile=${PIDFILE}
 ExecStartPre=${WORKDIR}/boot_ifconfig.sh
 ExecStart=${BINARY} ${CONFIG}
-ExecReload=/bin/kill -USR1 \$MAINPID
 Restart=always
 RestartSec=5
 LimitNOFILE=65535
@@ -297,8 +343,8 @@ configure_firewall() {
         exit 1
     fi
 
-    firewall-cmd --permanent --add-port=10000-29999/tcp
-    firewall-cmd --permanent --add-port=30000-49999/tcp
+    firewall-cmd --permanent --add-port=10000-29999/tcp 2>/dev/null
+    firewall-cmd --permanent --add-port=30000-49999/tcp 2>/dev/null
     firewall-cmd --reload
 
     echo ">>> Opened HTTP ports: 10000-29999/tcp"
@@ -389,7 +435,6 @@ test_proxy() {
         echo "WARNING: Both proxy tests failed. Possible causes:"
         echo "1. Provider has not routed an IPv6 /64 to this VPS."
         echo "2. Cloud provider firewall blocks the proxy ports."
-        echo "3. 3proxy configuration error."
         echo
         echo "Run:"
         echo "  systemctl status 3proxy --no-pager"
@@ -440,6 +485,10 @@ fi
 
 generate_ipv6_script
 generate_3proxy_config
+
+# Bat loi config NGAY TAI DAY, truoc khi tao service
+smoke_test_config
+
 configure_limits
 create_systemd_service
 apply_ipv6_addresses
@@ -447,9 +496,9 @@ configure_firewall
 
 echo ">>> Starting 3proxy"
 
-# Don dep tien trinh 3proxy cu neu co (tranh conflict port khi chay lai)
 pkill -x 3proxy 2>/dev/null || true
 sleep 1
+rm -f "$PIDFILE"
 
 if ! systemctl restart 3proxy; then
     echo "ERROR: 3proxy failed to start. Diagnostic info:"
@@ -490,5 +539,5 @@ echo
 echo "Useful commands:"
 echo "  systemctl status 3proxy --no-pager"
 echo "  journalctl -u 3proxy --no-pager -n 50"
-echo "  ss -lntp | grep 3proxy"
+echo "  ss -lntp | grep 3proxy | head"
 echo "============================================================="
