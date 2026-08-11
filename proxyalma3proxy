@@ -3,6 +3,7 @@
 # 3proxy IPv6 Installer for AlmaLinux 9
 # Compatible with GCC 10+ using -fcommon
 # HTTP proxy + SOCKS5
+# v3 - fix loi sinh file boot_ifconfig.sh (nodadnip)
 # =============================================================
 
 set -e
@@ -28,16 +29,13 @@ random_string() {
 }
 
 # -------------------------------------------------------------
-# Phát sinh IPv6 từ prefix 4 hextet đầu
+# Phat sinh IPv6 tu prefix 4 hextet dau
 # -------------------------------------------------------------
 
 HEX_ARRAY=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
 
 random_hex4() {
-    echo "${HEX_ARRAY[$RANDOM % 16]}\
-${HEX_ARRAY[$RANDOM % 16]}\
-${HEX_ARRAY[$RANDOM % 16]}\
-${HEX_ARRAY[$RANDOM % 16]}"
+    echo "${HEX_ARRAY[$RANDOM % 16]}${HEX_ARRAY[$RANDOM % 16]}${HEX_ARRAY[$RANDOM % 16]}${HEX_ARRAY[$RANDOM % 16]}"
 }
 
 generate_ipv6() {
@@ -46,7 +44,7 @@ generate_ipv6() {
 }
 
 # -------------------------------------------------------------
-# Tự tìm card mạng chính
+# Tu tim card mang chinh
 # -------------------------------------------------------------
 
 detect_interface() {
@@ -54,15 +52,7 @@ detect_interface() {
 
     iface=$(
         ip -4 route get 1.1.1.1 2>/dev/null |
-        awk '
-        {
-            for (i = 1; i <= NF; i++) {
-                if ($i == "dev") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }'
+        awk '{ for (i = 1; i <= NF; i++) if ($i == "dev") { print $(i + 1); exit } }'
     )
 
     if [ -z "$iface" ]; then
@@ -87,7 +77,7 @@ fi
 echo ">>> Main network interface: $ETH_MAIN"
 
 # -------------------------------------------------------------
-# Cài đặt 3proxy
+# Cai dat 3proxy (fix loi GCC 10+ bang -fcommon)
 # -------------------------------------------------------------
 
 install_3proxy() {
@@ -104,8 +94,7 @@ install_3proxy() {
     fi
 
     if [ ! -d "$THREEPROXY_DIR" ]; then
-        echo "ERROR: Extracted 3proxy directory not found:"
-        echo "$THREEPROXY_DIR"
+        echo "ERROR: Extracted 3proxy directory not found: $THREEPROXY_DIR"
         exit 1
     fi
 
@@ -115,13 +104,8 @@ install_3proxy() {
     make -f Makefile.Linux clean >/dev/null 2>&1 || true
 
     echo ">>> Building 3proxy with GCC compatibility flag -fcommon"
-
-    # 3proxy 0.8.6 có lỗi multiple definition với GCC mới.
-    # CC='gcc -fcommon' giúp xử lý lỗi linker authnserver.
     if ! make -f Makefile.Linux CC="gcc -fcommon"; then
-        echo
         echo "ERROR: 3proxy compilation failed."
-        echo "Check the compiler output above."
         exit 1
     fi
 
@@ -130,32 +114,20 @@ install_3proxy() {
         exit 1
     fi
 
-    mkdir -p "$INSTALL_DIR/bin"
-    mkdir -p "$INSTALL_DIR/logs"
-    mkdir -p "$INSTALL_DIR/stat"
-
+    mkdir -p "$INSTALL_DIR/bin" "$INSTALL_DIR/logs" "$INSTALL_DIR/stat"
     install -m 0755 src/3proxy "$BINARY"
 
-    if [ ! -x "$BINARY" ]; then
-        echo "ERROR: Cannot install 3proxy binary."
-        exit 1
-    fi
-
     echo ">>> 3proxy binary installed successfully"
-    "$BINARY" -h >/dev/null 2>&1 || true
 
     cd "$WORKDIR"
 }
 
 # -------------------------------------------------------------
-# Phát sinh dữ liệu proxy
-# Format:
-# USER/PASSWORD/IPv4/HTTP_PORT/IPv6
+# Phat sinh du lieu proxy
+# Format: USER/PASSWORD/IPv4/HTTP_PORT/IPv6
 # -------------------------------------------------------------
 
 generate_data() {
-    local http_port
-
     shuf -i 10000-29999 -n "$COUNT" |
     sort -n |
     while read -r http_port; do
@@ -164,36 +136,50 @@ generate_data() {
 }
 
 # -------------------------------------------------------------
-# Gán IPv6 vào interface
+# [FIX CHINH] Sinh script gan IPv6
+# Dung awk 'print' (tu them newline) thay vi printf ... \\n
+# Dung 'add ... || true' thay vi 'replace' de chay lai nhieu lan
 # -------------------------------------------------------------
 
 generate_ipv6_script() {
-    cat > "${WORKDIR}/boot_ifconfig.sh" <<EOF
-#!/bin/bash
-set -e
-
-$(awk -F "/" -v iface="$ETH_MAIN" '
-{
-    printf "ip -6 addr replace %s/64 dev %s nodad\\n", $5, iface
-}
-' "$WORKDATA")
-EOF
+    {
+        echo '#!/bin/bash'
+        awk -F "/" -v iface="$ETH_MAIN" \
+            '{ print "ip -6 addr add " $5 "/64 dev " iface " nodad 2>/dev/null || true" }' \
+            "$WORKDATA"
+    } > "${WORKDIR}/boot_ifconfig.sh"
 
     chmod 0755 "${WORKDIR}/boot_ifconfig.sh"
+
+    # Tu kiem tra file vua sinh
+    local lines
+    lines="$(wc -l < "${WORKDIR}/boot_ifconfig.sh")"
+
+    echo ">>> boot_ifconfig.sh generated: $lines lines"
+    echo ">>> Sample:"
+    sed -n '1,3p' "${WORKDIR}/boot_ifconfig.sh"
+
+    # Moi dong ip phai bat dau dung chuan, khong chua ky tu '\'
+    if grep -q '\\' "${WORKDIR}/boot_ifconfig.sh"; then
+        echo "ERROR: boot_ifconfig.sh contains literal backslash - generation failed."
+        exit 1
+    fi
+
+    if [ "$lines" -ne $((COUNT + 1)) ]; then
+        echo "ERROR: boot_ifconfig.sh has $lines lines, expected $((COUNT + 1))."
+        exit 1
+    fi
 }
 
 # -------------------------------------------------------------
-# Tạo cấu hình 3proxy
+# Tao cau hinh 3proxy
 # -------------------------------------------------------------
 
 generate_3proxy_config() {
     local maxconn
 
     maxconn=$((COUNT * 5 + 1000))
-
-    if [ "$maxconn" -gt 50000 ]; then
-        maxconn=50000
-    fi
+    [ "$maxconn" -gt 50000 ] && maxconn=50000
 
     cat > "$CONFIG" <<EOF
 daemon
@@ -216,28 +202,19 @@ log ${INSTALL_DIR}/logs/3proxy.log D
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
-users $(awk -F "/" '
-BEGIN {
-    ORS=""
-}
-{
-    print $1 ":CL:" $2 " "
-}
-' "$WORKDATA")
+users $(awk -F "/" 'BEGIN{ORS=""} {print $1 ":CL:" $2 " "}' "$WORKDATA")
 
-$(awk -F "/" '
-{
+$(awk -F "/" '{
     print "auth strong"
     print "allow " $1
     print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5
     print "socks -6 -a -p" ($4 + 20000) " -i" $3 " -e" $5
-}
-' "$WORKDATA")
+}' "$WORKDATA")
 EOF
 }
 
 # -------------------------------------------------------------
-# Lấy IP public
+# Lay IP public
 # -------------------------------------------------------------
 
 get_public_ips() {
@@ -265,21 +242,18 @@ get_public_ips() {
 }
 
 # -------------------------------------------------------------
-# Cấu hình giới hạn file descriptor
+# Gioi han file descriptor
 # -------------------------------------------------------------
 
 configure_limits() {
-    if ! grep -qE '^\* soft nofile 65535$' /etc/security/limits.conf; then
+    grep -qE '^\* soft nofile 65535$' /etc/security/limits.conf || \
         echo '* soft nofile 65535' >> /etc/security/limits.conf
-    fi
-
-    if ! grep -qE '^\* hard nofile 65535$' /etc/security/limits.conf; then
+    grep -qE '^\* hard nofile 65535$' /etc/security/limits.conf || \
         echo '* hard nofile 65535' >> /etc/security/limits.conf
-    fi
 }
 
 # -------------------------------------------------------------
-# Tạo systemd service
+# systemd service
 # -------------------------------------------------------------
 
 create_systemd_service() {
@@ -308,7 +282,7 @@ EOF
 }
 
 # -------------------------------------------------------------
-# Cấu hình firewall
+# Firewall
 # -------------------------------------------------------------
 
 configure_firewall() {
@@ -321,12 +295,8 @@ configure_firewall() {
         exit 1
     fi
 
-    # HTTP proxy ports
     firewall-cmd --permanent --add-port=10000-29999/tcp
-
-    # SOCKS5 ports
     firewall-cmd --permanent --add-port=30000-49999/tcp
-
     firewall-cmd --reload
 
     echo ">>> Opened HTTP ports: 10000-29999/tcp"
@@ -334,7 +304,7 @@ configure_firewall() {
 }
 
 # -------------------------------------------------------------
-# Gán IPv6 hiện tại và kiểm tra
+# Gan IPv6 va kiem tra that
 # -------------------------------------------------------------
 
 apply_ipv6_addresses() {
@@ -346,7 +316,7 @@ apply_ipv6_addresses() {
     local assigned
     assigned="$(ip -6 addr show dev "$ETH_MAIN" | grep -c 'inet6' || true)"
 
-    echo ">>> IPv6 addresses currently assigned: $assigned"
+    echo ">>> IPv6 addresses currently assigned: $assigned (expected $((COUNT + 1)))"
 
     if [ "$assigned" -lt 2 ]; then
         echo "ERROR: IPv6 addresses were not assigned correctly."
@@ -356,57 +326,39 @@ apply_ipv6_addresses() {
 }
 
 # -------------------------------------------------------------
-# Xuất danh sách proxy
+# Xuat danh sach proxy
 # -------------------------------------------------------------
 
 generate_proxy_lists() {
-    awk -F "/" '
-    {
-        print $3 ":" $4 ":" $1 ":" $2
-    }
-    ' "$WORKDATA" > "${WORKDIR}/proxy_http.txt"
+    awk -F "/" '{print $3 ":" $4 ":" $1 ":" $2}' "$WORKDATA" \
+        > "${WORKDIR}/proxy_http.txt"
 
-    awk -F "/" '
-    {
-        print $3 ":" ($4 + 20000) ":" $1 ":" $2
-    }
-    ' "$WORKDATA" > "${WORKDIR}/proxy_socks5.txt"
+    awk -F "/" '{print $3 ":" ($4 + 20000) ":" $1 ":" $2}' "$WORKDATA" \
+        > "${WORKDIR}/proxy_socks5.txt"
 
-    chmod 0600 \
-        "${WORKDIR}/proxy_http.txt" \
-        "${WORKDIR}/proxy_socks5.txt"
+    chmod 0600 "${WORKDIR}/proxy_http.txt" "${WORKDIR}/proxy_socks5.txt"
 
     echo ">>> HTTP list:   ${WORKDIR}/proxy_http.txt"
     echo ">>> SOCKS5 list: ${WORKDIR}/proxy_socks5.txt"
 }
 
 # -------------------------------------------------------------
-# Kiểm tra proxy bằng request thực tế
+# Test bang request that
 # -------------------------------------------------------------
 
 test_proxy() {
-    local first_line
-    local user
-    local pass
-    local ip
-    local port
-    local socks_port
-    local result_http
-    local result_socks
+    local first_line user pass ip port socks_port result_http result_socks
 
     first_line="$(head -n 1 "$WORKDATA")"
-
     user="$(echo "$first_line" | cut -d/ -f1)"
     pass="$(echo "$first_line" | cut -d/ -f2)"
-    ip="$(echo "$first_line" | cut -d/ -f3)"
+    ip="$(echo "$first_line"   | cut -d/ -f3)"
     port="$(echo "$first_line" | cut -d/ -f4)"
     socks_port=$((port + 20000))
 
-    echo ">>> Testing HTTP proxy"
-
+    echo ">>> Testing HTTP proxy ${ip}:${port} ..."
     result_http="$(
-        curl -4 -sS \
-            --max-time 20 \
+        curl -4 -sS --max-time 20 \
             --proxy "http://${user}:${pass}@${ip}:${port}" \
             https://api.ipify.org 2>/dev/null || true
     )"
@@ -417,11 +369,9 @@ test_proxy() {
         echo ">>> HTTP proxy test FAILED"
     fi
 
-    echo ">>> Testing SOCKS5 proxy"
-
+    echo ">>> Testing SOCKS5 proxy ${ip}:${socks_port} ..."
     result_socks="$(
-        curl -4 -sS \
-            --max-time 20 \
+        curl -4 -sS --max-time 20 \
             --socks5-hostname "${user}:${pass}@${ip}:${socks_port}" \
             https://api.ipify.org 2>/dev/null || true
     )"
@@ -434,11 +384,10 @@ test_proxy() {
 
     if [ -z "$result_http" ] && [ -z "$result_socks" ]; then
         echo
-        echo "WARNING: Both proxy tests failed."
-        echo "Possible causes:"
+        echo "WARNING: Both proxy tests failed. Possible causes:"
         echo "1. Provider has not routed an IPv6 /64 to this VPS."
         echo "2. Cloud provider firewall blocks the proxy ports."
-        echo "3. 3proxy logs contain a configuration error."
+        echo "3. 3proxy configuration error."
         echo
         echo "Run:"
         echo "  systemctl status 3proxy --no-pager"
@@ -454,42 +403,24 @@ test_proxy() {
 echo ">>> Installing required packages"
 
 dnf -y install \
-    gcc \
-    make \
-    curl \
-    wget \
-    bsdtar \
-    zip \
-    iproute \
-    net-tools \
-    firewalld \
-    nftables \
-    nmap-ncat \
-    procps-ng \
+    gcc make curl wget bsdtar zip \
+    iproute net-tools firewalld nftables \
+    nmap-ncat procps-ng \
     >/dev/null
 
 get_public_ips
 
 read -r -p "How many proxy pairs do you want to create? Example: 500: " COUNT
 
-if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]] || [ "$COUNT" -lt 1 ]; then
     echo "ERROR: COUNT must be a positive integer."
     exit 1
 fi
 
-if [ "$COUNT" -lt 1 ]; then
-    echo "ERROR: COUNT must be greater than zero."
-    exit 1
-fi
-
-# HTTP: 10000-29999 có tối đa 20.000 cổng
 if [ "$COUNT" -gt 20000 ]; then
     echo "ERROR: Maximum supported count is 20000."
     exit 1
 fi
-
-FIRST_PORT=10000
-LAST_PORT=29999
 
 echo ">>> Number of proxy pairs: $COUNT"
 echo ">>> HTTP port range: 10000-29999"
