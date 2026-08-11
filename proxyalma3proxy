@@ -1,222 +1,549 @@
 #!/bin/bash
 # =============================================================
-#  3proxy IPv6 Proxy Installer - ALMALINUX 9 (CLEAN EDITION)
-#  HTTP + SOCKS5 | random port | DNS trung lap | log rotate
-#  Tu phat hien interface | tu khoi phuc IPv6 sau reboot
+# 3proxy IPv6 Installer for AlmaLinux 9
+# Compatible with GCC 10+ using -fcommon
+# HTTP proxy + SOCKS5
 # =============================================================
 
 set -e
 
-if [ "$(id -u)" != "0" ]; then
-    echo "This script must be run as root" 1>&2
+if [ "$(id -u)" -ne 0 ]; then
+    echo "ERROR: Script must be run as root."
     exit 1
 fi
 
 WORKDIR="/home/proxy-installer"
 WORKDATA="${WORKDIR}/data.txt"
+THREEPROXY_DIR="${WORKDIR}/3proxy-3proxy-0.8.6"
+INSTALL_DIR="/usr/local/etc/3proxy"
+BINARY="${INSTALL_DIR}/bin/3proxy"
+CONFIG="${INSTALL_DIR}/3proxy.cfg"
+
 mkdir -p "$WORKDIR"
 cd "$WORKDIR"
 
-random() {
-    tr </dev/urandom -dc A-Za-z0-9 | head -c8
+random_string() {
+    tr </dev/urandom -dc 'A-Za-z0-9' | head -c 8
     echo
 }
 
-array=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
-gen64() {
-    ip64() {
-        echo "${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}${array[$RANDOM % 16]}"
-    }
-    echo "$1:$(ip64):$(ip64):$(ip64):$(ip64)"
+# -------------------------------------------------------------
+# Phát sinh IPv6 từ prefix 4 hextet đầu
+# -------------------------------------------------------------
+
+HEX_ARRAY=(1 2 3 4 5 6 7 8 9 0 a b c d e f)
+
+random_hex4() {
+    echo "${HEX_ARRAY[$RANDOM % 16]}\
+${HEX_ARRAY[$RANDOM % 16]}\
+${HEX_ARRAY[$RANDOM % 16]}\
+${HEX_ARRAY[$RANDOM % 16]}"
 }
 
-# ---------- Tu dong phat hien interface chinh ----------
-ETH_MAIN=$(ip -4 route get 1.1.1.1 2>/dev/null | awk '{for(i=1;i<=NF;i++) if ($i=="dev") {print $(i+1); exit}}')
+generate_ipv6() {
+    local prefix="$1"
+    echo "${prefix}:$(random_hex4):$(random_hex4):$(random_hex4):$(random_hex4)"
+}
+
+# -------------------------------------------------------------
+# Tự tìm card mạng chính
+# -------------------------------------------------------------
+
+detect_interface() {
+    local iface
+
+    iface=$(
+        ip -4 route get 1.1.1.1 2>/dev/null |
+        awk '
+        {
+            for (i = 1; i <= NF; i++) {
+                if ($i == "dev") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }'
+    )
+
+    if [ -z "$iface" ]; then
+        iface=$(
+            ip -o link show up |
+            awk -F': ' '$2 != "lo" {print $2}' |
+            cut -d'@' -f1 |
+            head -n 1
+        )
+    fi
+
+    echo "$iface"
+}
+
+ETH_MAIN="$(detect_interface)"
+
 if [ -z "$ETH_MAIN" ]; then
-    ETH_MAIN=$(ip -o link show up | awk -F': ' '$2 != "lo" {print $2}' | cut -d'@' -f1 | head -1)
+    echo "ERROR: Cannot detect the main network interface."
+    exit 1
 fi
-[ -z "$ETH_MAIN" ] && { echo "ERROR: Khong tim thay card mang!"; exit 1; }
-echo ">>> Main network interface: ${ETH_MAIN}"
+
+echo ">>> Main network interface: $ETH_MAIN"
+
+# -------------------------------------------------------------
+# Cài đặt 3proxy
+# -------------------------------------------------------------
 
 install_3proxy() {
-    echo ">>> Installing 3proxy"
-    cd "$WORKDIR"
-    rm -rf 3proxy-3proxy-0.8.6
-    URL="https://raw.githubusercontent.com/quayvlog/quayvlog/main/3proxy-3proxy-0.8.6.tar.gz"
-    wget -qO- "$URL" | bsdtar -xf-
-    cd 3proxy-3proxy-0.8.6
-    make -f Makefile.Linux
-    mkdir -p /usr/local/etc/3proxy/{bin,logs,stat}
-    cp src/3proxy /usr/local/etc/3proxy/bin/
+    local url
+    url="https://raw.githubusercontent.com/quayvlog/quayvlog/main/3proxy-3proxy-0.8.6.tar.gz"
+
+    echo ">>> Downloading 3proxy source"
+
+    rm -rf "$THREEPROXY_DIR"
+
+    if ! wget -qO- "$url" | bsdtar -xf-; then
+        echo "ERROR: Cannot download or extract 3proxy source."
+        exit 1
+    fi
+
+    if [ ! -d "$THREEPROXY_DIR" ]; then
+        echo "ERROR: Extracted 3proxy directory not found:"
+        echo "$THREEPROXY_DIR"
+        exit 1
+    fi
+
+    cd "$THREEPROXY_DIR"
+
+    echo ">>> Cleaning old build files"
+    make -f Makefile.Linux clean >/dev/null 2>&1 || true
+
+    echo ">>> Building 3proxy with GCC compatibility flag -fcommon"
+
+    # 3proxy 0.8.6 có lỗi multiple definition với GCC mới.
+    # CC='gcc -fcommon' giúp xử lý lỗi linker authnserver.
+    if ! make -f Makefile.Linux CC="gcc -fcommon"; then
+        echo
+        echo "ERROR: 3proxy compilation failed."
+        echo "Check the compiler output above."
+        exit 1
+    fi
+
+    if [ ! -x "src/3proxy" ]; then
+        echo "ERROR: 3proxy binary was not created."
+        exit 1
+    fi
+
+    mkdir -p "$INSTALL_DIR/bin"
+    mkdir -p "$INSTALL_DIR/logs"
+    mkdir -p "$INSTALL_DIR/stat"
+
+    install -m 0755 src/3proxy "$BINARY"
+
+    if [ ! -x "$BINARY" ]; then
+        echo "ERROR: Cannot install 3proxy binary."
+        exit 1
+    fi
+
+    echo ">>> 3proxy binary installed successfully"
+    "$BINARY" -h >/dev/null 2>&1 || true
+
     cd "$WORKDIR"
 }
 
-# ---------- [A3] Cong RANDOM trong dai 10000-29999 ----------
-# SOCKS5 = HTTP port + 20000 -> nam trong 30000-49999 (khong trung)
-gen_data() {
-    shuf -i 10000-29999 -n "$COUNT" | sort -n | while read -r port; do
-        echo "usr$(random)/pass$(random)/$IP4/$port/$(gen64 "$IP6")"
+# -------------------------------------------------------------
+# Phát sinh dữ liệu proxy
+# Format:
+# USER/PASSWORD/IPv4/HTTP_PORT/IPv6
+# -------------------------------------------------------------
+
+generate_data() {
+    local http_port
+
+    shuf -i 10000-29999 -n "$COUNT" |
+    sort -n |
+    while read -r http_port; do
+        echo "usr$(random_string)/pass$(random_string)/${IP4}/${http_port}/$(generate_ipv6 "$IP6")"
     done
 }
 
-# ---------- [A4] nodad: gan hang nghin IPv6 khong bi cham ----------
-gen_ifconfig() {
-    cat <<EOF
+# -------------------------------------------------------------
+# Gán IPv6 vào interface
+# -------------------------------------------------------------
+
+generate_ipv6_script() {
+    cat > "${WORKDIR}/boot_ifconfig.sh" <<EOF
 #!/bin/bash
-$(awk -F "/" -v iface="$ETH_MAIN" '{print "ip -6 addr add " $5 "/64 dev " iface " nodad 2>/dev/null || true"}' "${WORKDATA}")
+set -e
+
+$(awk -F "/" -v iface="$ETH_MAIN" '
+{
+    printf "ip -6 addr replace %s/64 dev %s nodad\\n", $5, iface
+}
+' "$WORKDATA")
 EOF
+
+    chmod 0755 "${WORKDIR}/boot_ifconfig.sh"
 }
 
-# ---------- [A1][A2][A5] Config: DNS trung lap + SOCKS5 + log rotate ----------
-gen_3proxy() {
-    MAXCONN=$((COUNT * 5 + 1000))
-    [ "$MAXCONN" -gt 50000 ] && MAXCONN=50000
-    cat <<EOF
+# -------------------------------------------------------------
+# Tạo cấu hình 3proxy
+# -------------------------------------------------------------
+
+generate_3proxy_config() {
+    local maxconn
+
+    maxconn=$((COUNT * 5 + 1000))
+
+    if [ "$maxconn" -gt 50000 ]; then
+        maxconn=50000
+    fi
+
+    cat > "$CONFIG" <<EOF
 daemon
-maxconn ${MAXCONN}
+maxconn ${maxconn}
+
 nscache 65535
-nserver 8.8.8.8
 nserver 1.1.1.1
-nserver 8.8.4.4
+nserver 8.8.8.8
+nserver 9.9.9.9
+
 timeouts 1 5 30 60 180 1800 15 60
+
 setgid 65535
 setuid 65535
 flush
+
 auth strong
 
-log /usr/local/etc/3proxy/logs/3proxy.log D
+log ${INSTALL_DIR}/logs/3proxy.log D
 logformat "- +_L%t.%. %N.%p %E %U %C:%c %R:%r %O %I %h %T"
 rotate 30
 
-users $(awk -F "/" 'BEGIN{ORS="";} {print $1 ":CL:" $2 " "}' "${WORKDATA}")
+users $(awk -F "/" '
+BEGIN {
+    ORS=""
+}
+{
+    print $1 ":CL:" $2 " "
+}
+' "$WORKDATA")
 
-$(awk -F "/" '{print "auth strong\nallow " $1 "\nproxy -6 -n -a -p" $4 " -i" $3 " -e" $5 "\nsocks -6 -a -p" $4+20000 " -i" $3 " -e" $5 "\n"}' "${WORKDATA}")
+$(awk -F "/" '
+{
+    print "auth strong"
+    print "allow " $1
+    print "proxy -6 -n -a -p" $4 " -i" $3 " -e" $5
+    print "socks -6 -a -p" ($4 + 20000) " -i" $3 " -e" $5
+}
+' "$WORKDATA")
 EOF
 }
 
-# ---------- Cai dat goi ----------
-echo ">>> Installing required packages"
-dnf -y install gcc make net-tools bsdtar zip curl wget >/dev/null
+# -------------------------------------------------------------
+# Lấy IP public
+# -------------------------------------------------------------
 
-install_3proxy
+get_public_ips() {
+    IP4="$(curl -4 -fsS --max-time 15 https://icanhazip.com | tr -d '\r\n')"
 
-# ---------- Phat hien IP ----------
-IP4=$(curl -4 -s icanhazip.com)
-IP6=$(curl -6 -s icanhazip.com | cut -f1-4 -d':')
+    IP6="$(
+        curl -6 -fsS --max-time 15 https://icanhazip.com |
+        tr -d '\r\n' |
+        cut -f1-4 -d':'
+    )"
 
-if [ -z "$IP4" ] || [ -z "$IP6" ]; then
-    echo "ERROR: VPS khong co IPv4 hoac IPv6."
-    echo "Luu y: provider phai route ca subnet /64 ve VPS (khong phai 1 IP /128)."
-    exit 1
-fi
-echo ">>> IPv4 = ${IP4} | IPv6 subnet = ${IP6}::/64"
+    if [ -z "$IP4" ]; then
+        echo "ERROR: Cannot detect public IPv4."
+        exit 1
+    fi
 
-read -p "How many proxies do you want to create? (khuyen nghi 300-500 cho VPS 2TB): " COUNT
-[ "$COUNT" -gt 19000 ] && { echo "ERROR: Toi da 19000 proxy (dai port)"; exit 1; }
+    if [ -z "$IP6" ]; then
+        echo "ERROR: Cannot detect public IPv6."
+        echo "The VPS must have a routed IPv6 prefix."
+        exit 1
+    fi
 
-gen_data > "$WORKDATA"
-gen_ifconfig > "${WORKDIR}/boot_ifconfig.sh"
-chmod +x "${WORKDIR}/boot_ifconfig.sh"
+    echo ">>> Public IPv4: $IP4"
+    echo ">>> IPv6 prefix: ${IP6}::/64"
+}
 
-gen_3proxy > /usr/local/etc/3proxy/3proxy.cfg
+# -------------------------------------------------------------
+# Cấu hình giới hạn file descriptor
+# -------------------------------------------------------------
 
-# ---------- Gioi han file descriptor ----------
-grep -q "nofile 65535" /etc/security/limits.conf 2>/dev/null || cat >> /etc/security/limits.conf <<EOF
-* soft nofile 65535
-* hard nofile 65535
-EOF
+configure_limits() {
+    if ! grep -qE '^\* soft nofile 65535$' /etc/security/limits.conf; then
+        echo '* soft nofile 65535' >> /etc/security/limits.conf
+    fi
 
-# ---------- systemd: gan lai IPv6 TRUOC khi start 3proxy ----------
-cat > /etc/systemd/system/3proxy.service <<EOF
+    if ! grep -qE '^\* hard nofile 65535$' /etc/security/limits.conf; then
+        echo '* hard nofile 65535' >> /etc/security/limits.conf
+    fi
+}
+
+# -------------------------------------------------------------
+# Tạo systemd service
+# -------------------------------------------------------------
+
+create_systemd_service() {
+    cat > /etc/systemd/system/3proxy.service <<EOF
 [Unit]
-Description=3proxy tiny proxy server
+Description=3proxy IPv6 proxy service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=forking
 ExecStartPre=${WORKDIR}/boot_ifconfig.sh
-ExecStart=/usr/local/etc/3proxy/bin/3proxy /usr/local/etc/3proxy/3proxy.cfg
+ExecStart=${BINARY} ${CONFIG}
 ExecStop=/bin/kill -TERM \$MAINPID
+Restart=on-failure
+RestartSec=5
 RemainAfterExit=yes
-Restart=always
 LimitNOFILE=65535
 
 [Install]
 WantedBy=multi-user.target
 EOF
 
-systemctl daemon-reload
-systemctl enable 3proxy
+    systemctl daemon-reload
+    systemctl enable 3proxy
+}
 
-# ---------- Gan IPv6 + kiem tra that ----------
-bash "${WORKDIR}/boot_ifconfig.sh"
-sleep 2
-ASSIGNED=$(ip -6 addr show dev "$ETH_MAIN" | grep -c "inet6" || true)
-echo ">>> IPv6 addresses on ${ETH_MAIN}: ${ASSIGNED} (can it nhat $((COUNT + 1)))"
-if [ "$ASSIGNED" -lt 2 ]; then
-    echo "ERROR: Gan IPv6 that bai tren ${ETH_MAIN}."
+# -------------------------------------------------------------
+# Cấu hình firewall
+# -------------------------------------------------------------
+
+configure_firewall() {
+    echo ">>> Configuring firewalld"
+
+    systemctl enable --now firewalld
+
+    if ! systemctl is-active --quiet firewalld; then
+        echo "ERROR: firewalld is not running."
+        exit 1
+    fi
+
+    # HTTP proxy ports
+    firewall-cmd --permanent --add-port=10000-29999/tcp
+
+    # SOCKS5 ports
+    firewall-cmd --permanent --add-port=30000-49999/tcp
+
+    firewall-cmd --reload
+
+    echo ">>> Opened HTTP ports: 10000-29999/tcp"
+    echo ">>> Opened SOCKS5 ports: 30000-49999/tcp"
+}
+
+# -------------------------------------------------------------
+# Gán IPv6 hiện tại và kiểm tra
+# -------------------------------------------------------------
+
+apply_ipv6_addresses() {
+    echo ">>> Applying IPv6 addresses"
+
+    bash "${WORKDIR}/boot_ifconfig.sh"
+    sleep 2
+
+    local assigned
+    assigned="$(ip -6 addr show dev "$ETH_MAIN" | grep -c 'inet6' || true)"
+
+    echo ">>> IPv6 addresses currently assigned: $assigned"
+
+    if [ "$assigned" -lt 2 ]; then
+        echo "ERROR: IPv6 addresses were not assigned correctly."
+        echo "Check whether your provider routes a /64 prefix to this VPS."
+        exit 1
+    fi
+}
+
+# -------------------------------------------------------------
+# Xuất danh sách proxy
+# -------------------------------------------------------------
+
+generate_proxy_lists() {
+    awk -F "/" '
+    {
+        print $3 ":" $4 ":" $1 ":" $2
+    }
+    ' "$WORKDATA" > "${WORKDIR}/proxy_http.txt"
+
+    awk -F "/" '
+    {
+        print $3 ":" ($4 + 20000) ":" $1 ":" $2
+    }
+    ' "$WORKDATA" > "${WORKDIR}/proxy_socks5.txt"
+
+    chmod 0600 \
+        "${WORKDIR}/proxy_http.txt" \
+        "${WORKDIR}/proxy_socks5.txt"
+
+    echo ">>> HTTP list:   ${WORKDIR}/proxy_http.txt"
+    echo ">>> SOCKS5 list: ${WORKDIR}/proxy_socks5.txt"
+}
+
+# -------------------------------------------------------------
+# Kiểm tra proxy bằng request thực tế
+# -------------------------------------------------------------
+
+test_proxy() {
+    local first_line
+    local user
+    local pass
+    local ip
+    local port
+    local socks_port
+    local result_http
+    local result_socks
+
+    first_line="$(head -n 1 "$WORKDATA")"
+
+    user="$(echo "$first_line" | cut -d/ -f1)"
+    pass="$(echo "$first_line" | cut -d/ -f2)"
+    ip="$(echo "$first_line" | cut -d/ -f3)"
+    port="$(echo "$first_line" | cut -d/ -f4)"
+    socks_port=$((port + 20000))
+
+    echo ">>> Testing HTTP proxy"
+
+    result_http="$(
+        curl -4 -sS \
+            --max-time 20 \
+            --proxy "http://${user}:${pass}@${ip}:${port}" \
+            https://api.ipify.org 2>/dev/null || true
+    )"
+
+    if [ -n "$result_http" ]; then
+        echo ">>> HTTP proxy OK. Exit IPv4: $result_http"
+    else
+        echo ">>> HTTP proxy test FAILED"
+    fi
+
+    echo ">>> Testing SOCKS5 proxy"
+
+    result_socks="$(
+        curl -4 -sS \
+            --max-time 20 \
+            --socks5-hostname "${user}:${pass}@${ip}:${socks_port}" \
+            https://api.ipify.org 2>/dev/null || true
+    )"
+
+    if [ -n "$result_socks" ]; then
+        echo ">>> SOCKS5 proxy OK. Exit IPv4: $result_socks"
+    else
+        echo ">>> SOCKS5 proxy test FAILED"
+    fi
+
+    if [ -z "$result_http" ] && [ -z "$result_socks" ]; then
+        echo
+        echo "WARNING: Both proxy tests failed."
+        echo "Possible causes:"
+        echo "1. Provider has not routed an IPv6 /64 to this VPS."
+        echo "2. Cloud provider firewall blocks the proxy ports."
+        echo "3. 3proxy logs contain a configuration error."
+        echo
+        echo "Run:"
+        echo "  systemctl status 3proxy --no-pager"
+        echo "  journalctl -u 3proxy --no-pager -n 50"
+        echo "  tail -n 50 ${INSTALL_DIR}/logs/3proxy.log"
+    fi
+}
+
+# =============================================================
+# MAIN
+# =============================================================
+
+echo ">>> Installing required packages"
+
+dnf -y install \
+    gcc \
+    make \
+    curl \
+    wget \
+    bsdtar \
+    zip \
+    iproute \
+    net-tools \
+    firewalld \
+    nftables \
+    nmap-ncat \
+    procps-ng \
+    >/dev/null
+
+get_public_ips
+
+read -r -p "How many proxy pairs do you want to create? Example: 500: " COUNT
+
+if ! [[ "$COUNT" =~ ^[0-9]+$ ]]; then
+    echo "ERROR: COUNT must be a positive integer."
     exit 1
 fi
 
-# ---------- Firewall: chi firewalld, mo 2 dai HTTP + SOCKS ----------
-systemctl enable --now firewalld 2>/dev/null || true
-if systemctl is-active --quiet firewalld; then
-    firewall-cmd --permanent --add-port=10000-29999/tcp   # HTTP proxy
-    firewall-cmd --permanent --add-port=30000-49999/tcp   # SOCKS5
-    firewall-cmd --reload
-    echo ">>> firewalld: opened 10000-29999 (HTTP) + 30000-49999 (SOCKS5)"
-else
-    echo "WARNING: firewalld khong chay - dung nftables truc tiep"
-    nft add table inet proxy_filter 2>/dev/null || true
-    nft add chain inet proxy_filter input '{ type filter hook input priority 0; policy accept; }' 2>/dev/null || true
-    nft add rule inet proxy_filter input tcp dport 10000-29999 accept
-    nft add rule inet proxy_filter input tcp dport 30000-49999 accept
+if [ "$COUNT" -lt 1 ]; then
+    echo "ERROR: COUNT must be greater than zero."
+    exit 1
 fi
 
-# ---------- Khoi dong + kiem tra ----------
+# HTTP: 10000-29999 có tối đa 20.000 cổng
+if [ "$COUNT" -gt 20000 ]; then
+    echo "ERROR: Maximum supported count is 20000."
+    exit 1
+fi
+
+FIRST_PORT=10000
+LAST_PORT=29999
+
+echo ">>> Number of proxy pairs: $COUNT"
+echo ">>> HTTP port range: 10000-29999"
+echo ">>> SOCKS5 port range: 30000-49999"
+
+install_3proxy
+
+echo ">>> Generating proxy data"
+generate_data > "$WORKDATA"
+
+if [ ! -s "$WORKDATA" ]; then
+    echo "ERROR: Proxy data file is empty."
+    exit 1
+fi
+
+generate_ipv6_script
+generate_3proxy_config
+configure_limits
+create_systemd_service
+apply_ipv6_addresses
+configure_firewall
+
+echo ">>> Starting 3proxy"
+
 systemctl restart 3proxy
 sleep 3
 
 if ! systemctl is-active --quiet 3proxy; then
-    echo "ERROR: 3proxy failed to start:"
-    journalctl -u 3proxy --no-pager -n 20
+    echo "ERROR: 3proxy failed to start."
+    journalctl -u 3proxy --no-pager -n 50
     exit 1
 fi
+
 echo ">>> 3proxy is running"
 
-# ---------- Xuat file proxy: CA HTTP LAN SOCKS5 ----------
-awk -F "/" '{print $3 ":" $4 ":" $1 ":" $2}' "$WORKDATA" > "${WORKDIR}/proxy_http.txt"
-awk -F "/" '{print $3 ":" $4+20000 ":" $1 ":" $2}' "$WORKDATA" > "${WORKDIR}/proxy_socks5.txt"
-echo ">>> HTTP proxies : ${WORKDIR}/proxy_http.txt"
-echo ">>> SOCKS5 proxies: ${WORKDIR}/proxy_socks5.txt"
-head -3 "${WORKDIR}/proxy_http.txt"
+generate_proxy_lists
 
-# ---------- TEST THAT ca 2 giao thuc ----------
-FIRST_LINE=$(head -1 "$WORKDATA")
-T_USER=$(echo "$FIRST_LINE" | cut -d/ -f1)
-T_PASS=$(echo "$FIRST_LINE" | cut -d/ -f2)
-T_IP=$(echo "$FIRST_LINE"   | cut -d/ -f3)
-T_PORT=$(echo "$FIRST_LINE" | cut -d/ -f4)
+echo
+echo ">>> First proxy entries:"
+head -n 5 "${WORKDIR}/proxy_http.txt"
 
-echo ">>> Testing HTTP proxy..."
-R1=$(curl -s --max-time 15 -x "http://${T_USER}:${T_PASS}@${T_IP}:${T_PORT}" https://api64.ipify.org 2>/dev/null || echo "FAILED")
-echo ">>> Testing SOCKS5 proxy..."
-R2=$(curl -s --max-time 15 --socks5 "${T_USER}:${T_PASS}@${T_IP}:$((T_PORT+20000))" https://api64.ipify.org 2>/dev/null || echo "FAILED")
+echo
+test_proxy
 
-[ "$R1" != "FAILED" ] && [ -n "$R1" ] && echo ">>> HTTP  OK -> exit IP: ${R1}" || echo ">>> HTTP  FAILED"
-[ "$R2" != "FAILED" ] && [ -n "$R2" ] && echo ">>> SOCKS5 OK -> exit IP: ${R2}" || echo ">>> SOCKS5 FAILED"
-
-if [ "$R1" = "FAILED" ] && [ "$R2" = "FAILED" ]; then
-    echo ">>> Ca 2 deu FAILED. Kiem tra:"
-    echo "    - Provider co route /64 ve VPS khong"
-    echo "    - Firewall tren CLOUD PANEL (ngoai OS) co chan port khong"
-fi
-
+echo
 echo "============================================================="
-echo " DONE."
-echo " HTTP   : ${WORKDIR}/proxy_http.txt   (IP:PORT:USER:PASS)"
-echo " SOCKS5 : ${WORKDIR}/proxy_socks5.txt (IP:PORT:USER:PASS)"
-echo " Logs   : /usr/local/etc/3proxy/logs/"
-echo " Config : /usr/local/etc/3proxy/3proxy.cfg"
+echo "Installation completed."
+echo "HTTP list:   ${WORKDIR}/proxy_http.txt"
+echo "SOCKS5 list: ${WORKDIR}/proxy_socks5.txt"
+echo "Config:      ${CONFIG}"
+echo "Logs:        ${INSTALL_DIR}/logs/3proxy.log"
+echo
+echo "Useful commands:"
+echo "  systemctl status 3proxy --no-pager"
+echo "  journalctl -u 3proxy --no-pager -n 50"
+echo "  ss -lntp | grep 3proxy"
 echo "============================================================="
